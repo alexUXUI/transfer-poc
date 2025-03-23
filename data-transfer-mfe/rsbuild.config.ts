@@ -3,9 +3,6 @@ import { pluginReact } from "@rsbuild/plugin-react";
 import { pluginModuleFederation } from "@module-federation/rsbuild-plugin";
 
 export default defineConfig({
-  server: {
-    port: 2001,
-  },
   plugins: [
     pluginReact(),
     pluginModuleFederation({
@@ -16,4 +13,20 @@ export default defineConfig({
       shared: ["react", "react-dom"],
     }),
   ],
+  output: {
+    copy: [
+      {
+        from: "./public/service-worker.js",
+        to: "service-worker.js",
+      },
+    ],
+  },
+  source: {
+    alias: {
+      // Add any aliases you need here
+    },
+  },
+  server: {
+    port: 2001,
+  },
 });

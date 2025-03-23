@@ -1,0 +1,343 @@
+import React, { useEffect, useState, useCallback } from "react";
+import { dataTransferService, TransferEvents } from "../services/data-transfer";
+import { TransferSession } from "../services/db";
+import { isServiceWorkerSupported } from "../services/service-worker";
+
+// Constants
+const SOURCE_URL = "http://localhost:3000/specification";
+const TARGET_URL = "http://localhost:3001/upload";
+
+interface DataTransferProps {
+  onUnmount?: () => void;
+}
+
+// Statuses displayed to user
+const statusMessages = {
+  initializing: "Preparing transfer...",
+  active: "Transferring data...",
+  paused: "Transfer paused",
+  completed: "Transfer completed",
+  failed: "Transfer failed",
+};
+
+// Simple notification function instead of toast
+const showNotification = (
+  message: string,
+  type: "success" | "error" | "info" = "info"
+) => {
+  console.log(`[${type.toUpperCase()}] ${message}`);
+  // You could implement a custom notification UI here if needed
+};
+
+const DataTransfer: React.FC<DataTransferProps> = ({ onUnmount }) => {
+  // State
+  const [session, setSession] = useState<TransferSession | null>(null);
+  const [isStarting, setIsStarting] = useState(false);
+  const [processedItems, setProcessedItems] = useState(0);
+  const [totalItems, setTotalItems] = useState<number | null>(null);
+  const [percentage, setPercentage] = useState<number | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [processingChunks, setProcessingChunks] = useState(0);
+  const [successfulChunks, setSuccessfulChunks] = useState(0);
+  const [failedChunks, setFailedChunks] = useState(0);
+  const [isBrowserSupported, setIsBrowserSupported] = useState(true);
+
+  // Check if the browser is supported
+  useEffect(() => {
+    // Service workers and IndexedDB are required
+    const isSupported = isServiceWorkerSupported && "indexedDB" in window;
+    setIsBrowserSupported(isSupported);
+
+    if (!isSupported) {
+      setError(
+        "Your browser does not support required features (Service Workers and IndexedDB)."
+      );
+    }
+  }, []);
+
+  // Set up event handlers for the data transfer service
+  useEffect(() => {
+    // Define event handlers
+    const events: TransferEvents = {
+      onSessionCreated: (newSession) => {
+        setSession(newSession);
+        console.log("Session created:", newSession);
+      },
+
+      onStatusChange: (status, updatedSession) => {
+        setSession(updatedSession);
+        console.log(`Status changed to ${status}`);
+
+        if (status === "completed") {
+          showNotification("Data transfer completed successfully!", "success");
+        } else if (status === "failed") {
+          showNotification(
+            `Transfer failed: ${updatedSession.error || "Unknown error"}`,
+            "error"
+          );
+        } else if (status === "paused") {
+          showNotification("Transfer paused", "info");
+        } else if (status === "active") {
+          showNotification("Transfer active", "info");
+        }
+      },
+
+      onProgress: (processed, total, percent) => {
+        setProcessedItems(processed);
+        if (total !== null) setTotalItems(total);
+        if (percent !== null) setPercentage(percent);
+      },
+
+      onChunkProcessed: (chunkId, success, items) => {
+        if (success) {
+          setSuccessfulChunks((prev) => prev + 1);
+        } else {
+          setFailedChunks((prev) => prev + 1);
+        }
+        setProcessingChunks((prev) => Math.max(0, prev - 1));
+      },
+
+      onError: (err) => {
+        setError(err.message);
+        showNotification(`Error: ${err.message}`, "error");
+      },
+    };
+
+    // Register event handlers
+    dataTransferService.on(events);
+
+    // Check for existing session
+    const checkSession = async () => {
+      try {
+        const existingSession = await dataTransferService.getCurrentSession();
+        if (existingSession) {
+          setSession(existingSession);
+          setProcessedItems(existingSession.processedItems);
+          setTotalItems(existingSession.totalItems);
+
+          if (
+            existingSession.totalItems !== null &&
+            existingSession.processedItems > 0
+          ) {
+            setPercentage(
+              Math.round(
+                (existingSession.processedItems / existingSession.totalItems) *
+                  100
+              )
+            );
+          }
+        }
+      } catch (error) {
+        console.error("Error checking session:", error);
+      }
+    };
+
+    checkSession();
+
+    // Cleanup when the component unmounts
+    return () => {
+      // Don't stop the transfer, just notify parent component
+      if (onUnmount) {
+        onUnmount();
+      }
+    };
+  }, [onUnmount]);
+
+  // Start transfer
+  const startTransfer = useCallback(async () => {
+    try {
+      setIsStarting(true);
+      setError(null);
+      setProcessedItems(0);
+      setTotalItems(null);
+      setPercentage(null);
+      setSuccessfulChunks(0);
+      setFailedChunks(0);
+      setProcessingChunks(0);
+
+      await dataTransferService.startTransfer(SOURCE_URL, TARGET_URL, 100);
+    } catch (error) {
+      console.error("Error starting transfer:", error);
+      setError(
+        error instanceof Error
+          ? error.message
+          : "Unknown error starting transfer"
+      );
+      showNotification(
+        `Failed to start transfer: ${
+          error instanceof Error ? error.message : "Unknown error"
+        }`,
+        "error"
+      );
+    } finally {
+      setIsStarting(false);
+    }
+  }, []);
+
+  // Pause transfer
+  const pauseTransfer = useCallback(async () => {
+    try {
+      await dataTransferService.pauseTransfer();
+    } catch (error) {
+      console.error("Error pausing transfer:", error);
+      showNotification(
+        `Failed to pause transfer: ${
+          error instanceof Error ? error.message : "Unknown error"
+        }`,
+        "error"
+      );
+    }
+  }, []);
+
+  // Resume transfer
+  const resumeTransfer = useCallback(async () => {
+    try {
+      await dataTransferService.resumeTransfer();
+    } catch (error) {
+      console.error("Error resuming transfer:", error);
+      showNotification(
+        `Failed to resume transfer: ${
+          error instanceof Error ? error.message : "Unknown error"
+        }`,
+        "error"
+      );
+    }
+  }, []);
+
+  // Cancel transfer
+  const cancelTransfer = useCallback(async () => {
+    try {
+      await dataTransferService.cancelTransfer();
+    } catch (error) {
+      console.error("Error cancelling transfer:", error);
+      showNotification(
+        `Failed to cancel transfer: ${
+          error instanceof Error ? error.message : "Unknown error"
+        }`,
+        "error"
+      );
+    }
+  }, []);
+
+  if (!isBrowserSupported) {
+    return (
+      <div className="data-transfer-container">
+        <div className="error-message">
+          <h3>Browser Not Supported</h3>
+          <p>
+            Your browser does not support the required features for data
+            transfer (Service Workers and IndexedDB).
+          </p>
+          <p>
+            Please try using a modern browser like Chrome, Firefox, Edge or
+            Safari.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="data-transfer-container">
+      <h2>Data Transfer</h2>
+
+      {error && (
+        <div className="error-message">
+          <h3>Error</h3>
+          <p>{error}</p>
+        </div>
+      )}
+
+      <div className="status-section">
+        <h3>Status</h3>
+        <div className="status-info">
+          <p>
+            <strong>Status:</strong>{" "}
+            {session ? statusMessages[session.status] : "Ready to start"}
+          </p>
+
+          {session && (
+            <>
+              <p>
+                <strong>Progress:</strong> {processedItems} items processed
+                {totalItems !== null && ` of ${totalItems}`}
+                {percentage !== null && ` (${percentage}%)`}
+              </p>
+
+              <p>
+                <strong>Chunks:</strong> {successfulChunks} successful,{" "}
+                {failedChunks} failed, {processingChunks} in progress
+              </p>
+            </>
+          )}
+        </div>
+
+        {session && session.status === "active" && (
+          <div className="progress-bar">
+            <div
+              className="progress-bar-fill"
+              style={{ width: percentage !== null ? `${percentage}%` : "100%" }}
+            />
+            <div className="progress-bar-text">
+              {percentage !== null ? `${percentage}%` : "Processing..."}
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="controls-section">
+        {!session && (
+          <button
+            onClick={startTransfer}
+            disabled={isStarting || !isBrowserSupported}
+            className="start-button"
+          >
+            {isStarting ? "Starting..." : "Start Transfer"}
+          </button>
+        )}
+
+        {session && session.status === "active" && (
+          <button onClick={pauseTransfer} className="pause-button">
+            Pause Transfer
+          </button>
+        )}
+
+        {session && session.status === "paused" && (
+          <button onClick={resumeTransfer} className="resume-button">
+            Resume Transfer
+          </button>
+        )}
+
+        {session && ["active", "paused", "failed"].includes(session.status) && (
+          <button onClick={cancelTransfer} className="cancel-button">
+            Cancel Transfer
+          </button>
+        )}
+
+        {session && session.status === "completed" && (
+          <button onClick={startTransfer} className="start-button">
+            Start New Transfer
+          </button>
+        )}
+      </div>
+
+      {session && session.status === "failed" && session.error && (
+        <div className="error-details">
+          <h3>Error Details</h3>
+          <pre>{session.error}</pre>
+        </div>
+      )}
+
+      <div className="info-section">
+        <p>
+          <strong>Source:</strong> {SOURCE_URL}
+        </p>
+        <p>
+          <strong>Target:</strong> {TARGET_URL}
+        </p>
+      </div>
+    </div>
+  );
+};
+
+export default DataTransfer;

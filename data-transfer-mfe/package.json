@@ -13,8 +13,10 @@
   "dependencies": {
     "@module-federation/bridge-react": "^0.11.1",
     "@module-federation/rsbuild-plugin": "^0.11.1",
+    "idb": "^8.0.2",
     "react": "^18.0.0",
-    "react-dom": "^18.0.0"
+    "react-dom": "^18.0.0",
+    "react-toastify": "^11.0.5"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",
