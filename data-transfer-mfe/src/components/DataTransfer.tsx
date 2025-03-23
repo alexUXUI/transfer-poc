@@ -329,6 +329,71 @@ const DataTransfer: React.FC<DataTransferProps> = ({ onUnmount }) => {
     return () => clearInterval(timerId);
   }, [session?.status, session?.id, processedItems]);
 
+  // Add a dedicated UI refresh effect - this is crucial for keeping the UI updated
+  useEffect(() => {
+    let isMounted = true;
+
+    // This function will continuously poll the database for updates
+    const pollForUpdates = async () => {
+      if (!isMounted) return;
+
+      try {
+        const currentSession = await dataTransferService.getCurrentSession();
+        if (currentSession) {
+          console.log(
+            `UI Refresh: ${currentSession.processedItems}/${currentSession.totalItems} items`
+          );
+
+          // Update all component state to match the database state
+          setSession(currentSession);
+          setProcessedItems(currentSession.processedItems);
+
+          if (currentSession.totalItems !== null) {
+            setTotalItems(currentSession.totalItems);
+            const calculatedPercentage = Math.round(
+              (currentSession.processedItems / currentSession.totalItems) * 100
+            );
+            setPercentage(calculatedPercentage);
+          }
+        }
+      } catch (err) {
+        console.error("Error polling for updates:", err);
+      }
+
+      // Continue polling
+      if (isMounted) {
+        setTimeout(pollForUpdates, 100); // Poll very frequently (every 100ms)
+      }
+    };
+
+    // Start polling
+    pollForUpdates();
+
+    // Clean up when unmounting
+    return () => {
+      isMounted = false;
+    };
+  }, []); // Empty dependency array so it runs once on mount
+
+  // Update chunk counts when session updates
+  useEffect(() => {
+    if (!session) return;
+
+    // Calculate successful chunks based on processed items
+    if (session.processedItems > 0 && session.chunkSize > 0) {
+      const estimatedSuccessfulChunks = Math.ceil(
+        session.processedItems / session.chunkSize
+      );
+      setSuccessfulChunks(estimatedSuccessfulChunks);
+    }
+
+    // Update progress text based on session status
+    if (session.status === "active" && session.totalItems) {
+      const progressText = `${session.processedItems} of ${session.totalItems} items processed`;
+      console.log(`Updated progress text: ${progressText}`);
+    }
+  }, [session]);
+
   // Start transfer
   const startTransfer = useCallback(async () => {
     try {
@@ -468,13 +533,13 @@ const DataTransfer: React.FC<DataTransferProps> = ({ onUnmount }) => {
         {session && session.status === "active" && (
           <div
             className="progress-bar"
-            key={`progress-${processedItems}-${totalItems}-${percentage}`}
+            key={`progress-${Date.now()}-${Math.random()}`}
           >
             <div
               className="progress-bar-fill"
               style={{
                 width: percentage !== null ? `${percentage}%` : "0%",
-                transition: "width 0.3s ease-in-out",
+                transition: "width 0.1s ease-in-out",
               }}
             />
             <div className="progress-bar-text">

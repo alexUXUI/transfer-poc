@@ -226,7 +226,8 @@ export class DataTransferService {
       console.error("Error starting transfer:", error);
       if (this.events.onError) {
         this.events.onError(
-          error instanceof Error ? error : new Error(String(error))
+          error instanceof Error ? error : new Error(String(error)),
+          undefined
         );
       }
       throw error;
@@ -270,7 +271,8 @@ export class DataTransferService {
       console.error("Error pausing transfer:", error);
       if (this.events.onError) {
         this.events.onError(
-          error instanceof Error ? error : new Error(String(error))
+          error instanceof Error ? error : new Error(String(error)),
+          this.session || undefined
         );
       }
       return null;
@@ -310,7 +312,8 @@ export class DataTransferService {
       console.error("Error resuming transfer:", error);
       if (this.events.onError) {
         this.events.onError(
-          error instanceof Error ? error : new Error(String(error))
+          error instanceof Error ? error : new Error(String(error)),
+          this.session || undefined
         );
       }
       return null;
@@ -345,7 +348,8 @@ export class DataTransferService {
       console.error("Error cancelling transfer:", error);
       if (this.events.onError) {
         this.events.onError(
-          error instanceof Error ? error : new Error(String(error))
+          error instanceof Error ? error : new Error(String(error)),
+          this.session || undefined
         );
       }
     }
@@ -488,7 +492,8 @@ export class DataTransferService {
       console.error("Error processing chunk:", error);
       await this.handleChunkError(
         chunk.id,
-        error instanceof Error ? error : new Error(String(error))
+        error instanceof Error ? error : new Error(String(error)),
+        this.session || undefined
       );
     }
   }
@@ -586,14 +591,18 @@ export class DataTransferService {
       if (this.events.onError) {
         this.events.onError(
           err instanceof Error ? err : new Error(String(err)),
-          this.session
+          this.session || undefined
         );
       }
     }
   }
 
   // Handle chunk processing error
-  private async handleChunkError(chunkId: string, error: Error) {
+  private async handleChunkError(
+    chunkId: string,
+    error: Error,
+    session?: TransferSession
+  ) {
     if (!this.session) return;
 
     try {
@@ -635,7 +644,7 @@ export class DataTransferService {
             new Error(
               `Transfer failed after ${MAX_RETRIES} retries: ${error.message}`
             ),
-            this.session
+            session || undefined
           );
         }
 
@@ -643,6 +652,12 @@ export class DataTransferService {
       }
     } catch (error) {
       console.error("Error handling chunk error:", error);
+      if (this.events.onError) {
+        this.events.onError(
+          error instanceof Error ? error : new Error(String(error)),
+          session || undefined
+        );
+      }
     }
   }
 
@@ -675,7 +690,8 @@ export class DataTransferService {
 
       if (this.events.onError) {
         this.events.onError(
-          error instanceof Error ? error : new Error(String(error))
+          error instanceof Error ? error : new Error(String(error)),
+          this.session || undefined
         );
       }
     } finally {
@@ -794,7 +810,8 @@ export class DataTransferService {
 
         if (this.events.onError) {
           this.events.onError(
-            error instanceof Error ? error : new Error(String(error))
+            error instanceof Error ? error : new Error(String(error)),
+            this.session || undefined
           );
         }
 
@@ -955,7 +972,8 @@ export class DataTransferService {
       } else {
         await this.handleChunkError(
           chunk.id,
-          error instanceof Error ? error : new Error(String(error))
+          error instanceof Error ? error : new Error(String(error)),
+          this.session || undefined
         );
       }
     }
@@ -969,43 +987,20 @@ export class DataTransferService {
     try {
       console.log(`Forcing progress update with count: ${processedCount}`);
 
-      // Get the most recent session data for accuracy
-      if (this.session.id) {
-        db.getSession(this.session.id)
-          .then((updatedSession: TransferSession | undefined) => {
-            if (updatedSession) {
-              this.session = updatedSession;
+      // Directly trigger progress event with current values
+      const percentage = this.session.totalItems
+        ? Math.round((processedCount / this.session.totalItems) * 100)
+        : null;
 
-              // Use the most current data for calculations
-              const percentage = updatedSession.totalItems
-                ? Math.round(
-                    (updatedSession.processedItems /
-                      updatedSession.totalItems) *
-                      100
-                  )
-                : null;
+      this.events.onProgress(
+        processedCount,
+        this.session.totalItems,
+        percentage
+      );
 
-              // This will force the UI to update immediately with accurate data
-              if (this.events.onProgress) {
-                this.events.onProgress(
-                  updatedSession.processedItems,
-                  updatedSession.totalItems,
-                  percentage
-                );
-              }
-
-              // Also trigger a status change notification to refresh UI
-              if (
-                this.events.onStatusChange &&
-                updatedSession.status === "active"
-              ) {
-                this.events.onStatusChange("active", updatedSession);
-              }
-            }
-          })
-          .catch((error: Error) => {
-            console.error("Error getting updated session data:", error);
-          });
+      // Also notify of status change to trigger UI updates
+      if (this.events.onStatusChange && this.session.status === "active") {
+        this.events.onStatusChange("active", this.session);
       }
     } catch (error) {
       console.error("Error forcing progress update:", error);
