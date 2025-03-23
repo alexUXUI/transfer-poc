@@ -1,49 +1,60 @@
 sequenceDiagram
-    participant SourceServer as Source Server API
     participant Browser as Web Browser
     participant FetchAPI as Browser Fetch API
     participant IndexedDB as Browser IndexedDB
+    participant SourceServer as Source Server API
     participant TargetServer as Target Server API
     
     Note over Browser: User initiates data transfer
     
-    Browser->>IndexedDB: Create TransferSession
-    IndexedDB-->>Browser: Session Created
+    Note right of Browser: 1 Browser creates a TransferSession to enable <br/>resumability, progress tracking, and state <br/>management across browser sessions
+    Browser->>IndexedDB: Create TransferSession (Data: source/target URLs, status="initializing")
+    IndexedDB-->>Browser: Session Created (Data: Session object with generated unique ID)
+    Note left of Browser: 2 Session ID becomes the linking key for all related chunks
     
     loop Until all data is transferred
-        Browser->>FetchAPI: Fetch data chunk with pagination (skip, top)
-        FetchAPI->>SourceServer: HTTP GET request
-        SourceServer-->>FetchAPI: JSON response with items and totalCount
-        FetchAPI-->>Browser: Process response
+        Note right of Browser: 3 Main orchestration loop begins: download → store → process
+        Browser->>FetchAPI: 4 Fetch data chunk with pagination (Data: skip=offset, top=limit)
+        Note right of FetchAPI: Pagination prevents memory overflow for large datasets
+        FetchAPI->>SourceServer: 5 HTTP GET request (Data: eg, GET /api/data?skip=0&top=100)
+        SourceServer-->>FetchAPI: 6 JSON response (Data: items array and totalCount for progress calculation)
+        FetchAPI-->>Browser: 7 Process response (Data: Parsed JSON ready for storage)
         
-        Browser->>IndexedDB: Store chunk in dataChunks store
-        IndexedDB-->>Browser: Chunk stored with "pending" status
+        Note right of Browser: 8 Persistent storage enables retry capability and prevents data loss
+        Browser->>IndexedDB: Store chunk in dataChunks store (Data: sessionId, items, status="pending")
+        IndexedDB-->>Browser: 9 Chunk stored (Data: Confirmation with chunk ID, status="pending")
         
+        Note over Browser, TargetServer: 10 Parallel processing improves throughput while maintaining controlled resource usage
         par Process chunks in parallel (max 3 concurrent)
             loop For each pending chunk
-                Browser->>IndexedDB: Query for pending chunks
-                IndexedDB-->>Browser: Return pending chunks
+                Browser->>IndexedDB: 11 Query for pending chunks (Data: sessionId, status="pending", limit=available_slots)
+                IndexedDB-->>Browser: 12 Return pending chunks (Data: Array of chunk objects)
                 
-                Browser->>IndexedDB: Update chunk status to "processing"
+                Note right of Browser: 13 Status update prevents race conditions in concurrent environment
+                Browser->>IndexedDB: Update chunk status to "processing" (Data: chunkId, status="processing")
                 
-                Browser->>FetchAPI: Send chunk to target server
-                FetchAPI->>TargetServer: HTTP POST with chunk data
-                TargetServer-->>FetchAPI: Process confirmation
-                FetchAPI-->>Browser: Success/failure response
+                Note right of Browser: 14 Send chunk to target for processing
+                Browser->>FetchAPI: Send chunk to target server (Data: HTTP POST with items as payload)
+                FetchAPI->>TargetServer: 15 HTTP POST with chunk data (Data: eg, POST /api/import with JSON body)
+                TargetServer-->>FetchAPI: 16 Process confirmation (Data: Success/failure status and details)
+                FetchAPI-->>Browser: 17 Processing result (Data: Success or failure with reason)
                 
                 alt Successful transfer
-                    Browser->>IndexedDB: Update chunk status to "completed"
-                    Browser->>IndexedDB: Update Session.processedItems count
-                    Browser->>Browser: Check if transfer complete
+                    Browser->>IndexedDB: 18 Update chunk status to "completed" (Data: chunkId, status="completed") 
+                    Browser->>IndexedDB: 19 Update SessionprocessedItems count (Data: sessionId, processedItems += chunkitemslength)
+                    Note right of Browser: 20 Progress tracking enables accurate reporting to user
+                    Browser->>Browser: Check if transfer complete (Data: calculation processedItems === totalItems)
                 else Failed transfer
-                    Browser->>IndexedDB: Update chunk status to "failed"
+                    Browser->>IndexedDB: 21 Update chunk status to "failed" (Data: chunkId, status="failed", error details)
+                    Note right of Browser: 22 Retry logic handles transient network failures (up to 3 attempts)
                     Browser->>Browser: Retry logic (up to 3 times)
                 end
             end
         end
     end
     
-    Browser->>IndexedDB: Update Session status to "completed"
-    IndexedDB-->>Browser: Session updated
+    Note right of Browser: 23-24. Final status update marks overall operation as complete
+    Browser->>IndexedDB: Update Session status to "completed" (Data: sessionId, status="completed")
+    IndexedDB-->>Browser: 25. Session updated (Data: Confirmation event)
     
-    Note over Browser: Transfer complete notification to user 
+    Note over Browser: 26. Transfer complete notification to user (Data: UI event with statistics) 
