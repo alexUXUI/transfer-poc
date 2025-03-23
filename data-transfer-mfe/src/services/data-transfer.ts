@@ -28,7 +28,6 @@ export interface TransferEvents {
 // Main class for managing data transfers
 export class DataTransferService {
   private session: TransferSession | null = null;
-  private polling = false;
   private pauseRequested = false;
   private retryCount = 0;
   private pendingChunks = new Set<string>();
@@ -36,6 +35,8 @@ export class DataTransferService {
   private activeDownload: AbortController | null = null;
   private downloadQueue: { skip: number; top: number }[] = [];
   private processingQueue = false;
+  private chunkProcessors: number = 0; // Counter for active chunk processors
+  private isProcessingPaused: boolean = false; // Flag for paused processing
 
   constructor() {
     this.init();
@@ -52,7 +53,7 @@ export class DataTransferService {
 
         // Set up event handling if session is active
         if (activeSession.status === "active") {
-          this.startPolling();
+          this.resumeProcessing();
         }
       }
     } catch (error) {
@@ -121,7 +122,7 @@ export class DataTransferService {
 
       // Start the transfer process
       await this.updateSessionStatus("active");
-      this.startPolling();
+      this.resumeProcessing();
       this.enqueueFetch(0, chunkSize);
 
       return this.session;
@@ -144,6 +145,7 @@ export class DataTransferService {
     }
 
     console.log("Pause requested! Setting pauseRequested flag...");
+    this.pauseProcessing();
     this.pauseRequested = true;
 
     // Cancel any active download
@@ -174,7 +176,6 @@ export class DataTransferService {
 
     try {
       await this.updateSessionStatus("paused");
-      this.stopPolling();
 
       if (this.events.onPaused && this.session) {
         this.events.onPaused(this.session);
@@ -204,7 +205,7 @@ export class DataTransferService {
       this.pauseRequested = false;
 
       await this.updateSessionStatus("active");
-      this.startPolling();
+      this.resumeProcessing();
 
       // Resume from where we left off
       if (this.session.lastChunkId) {
@@ -250,8 +251,8 @@ export class DataTransferService {
     }
 
     // Stop any active processes
+    this.pauseProcessing();
     this.pauseRequested = true;
-    this.stopPolling();
 
     if (this.activeDownload) {
       this.activeDownload.abort();
@@ -278,159 +279,63 @@ export class DataTransferService {
     }
   }
 
-  // Get the current session
-  public async getCurrentSession(): Promise<TransferSession | null> {
-    if (this.session) {
-      return this.session;
-    }
-
-    // Try to get from database
-    try {
-      const session = await db.getActiveSession();
-      return session || null; // Convert undefined to null explicitly
-    } catch (error) {
-      console.error("Error getting current session:", error);
-      return null;
-    }
+  // Event-Driven: Pause processing of pending chunks
+  private pauseProcessing(): void {
+    this.isProcessingPaused = true;
+    console.log("Event processing paused");
   }
 
-  // Check if a transfer is in progress
-  public isTransferInProgress(): boolean {
-    return !!this.session && this.session.status === "active";
-  }
+  // Event-Driven: Resume processing of pending chunks
+  private resumeProcessing(): void {
+    if (this.isProcessingPaused) {
+      this.isProcessingPaused = false;
+      console.log("Event processing resumed");
 
-  // Update the session status
-  private async updateSessionStatus(
-    status: TransferSession["status"],
-    error?: string
-  ): Promise<TransferSession> {
-    if (!this.session) {
-      throw new Error("No active session");
-    }
+      // Trigger an immediate check for pending chunks
+      this.checkAndProcessPendingChunks();
 
-    try {
-      this.session = await db.updateSession(this.session.id, { status, error });
-
-      // Notify status change
-      if (this.events.onStatusChange) {
-        this.events.onStatusChange(status, this.session);
-      }
-
-      // Handle completion
-      if (status === "completed" && this.events.onComplete) {
-        this.events.onComplete(this.session);
-        this.cleanup();
-      }
-
-      return this.session;
-    } catch (error) {
-      console.error("Error updating session status:", error);
-      throw error;
-    }
-  }
-
-  // Start polling for chunks to process
-  private startPolling() {
-    if (this.polling) return;
-
-    this.polling = true;
-    this.pollPendingChunks();
-  }
-
-  // Stop polling
-  private stopPolling() {
-    this.polling = false;
-  }
-
-  // Add a dedicated method to check for stuck transfers and resolve them
-  private async checkTransferStatus(): Promise<void> {
-    if (!this.session || this.session.totalItems === null) return;
-
-    try {
-      // Get the most up-to-date session data
-      const currentSession = await db.getSession(this.session.id);
-      if (!currentSession || currentSession.totalItems === null) return;
-
-      const { processedItems, totalItems, status } = currentSession;
-
-      console.log(
-        `Checking transfer status: ${processedItems}/${totalItems} (${status})`
-      );
-
-      // If we're active but nothing is happening, check what's missing
-      if (
-        status === "active" &&
-        processedItems < totalItems &&
-        this.pendingChunks.size === 0 &&
-        !this.activeDownload &&
-        this.downloadQueue.length === 0
-      ) {
-        console.log(
-          "Transfer appears stuck. Attempting to resume from current position."
+      // Also trigger a check for completion
+      if (this.session) {
+        this.checkIfTransferComplete(this.session).catch((err) =>
+          console.error("Error checking if transfer is complete:", err)
         );
-
-        // Calculate how many chunks we've processed and how many we should have
-        const chunkSize = currentSession.chunkSize || DEFAULT_CHUNK_SIZE;
-        const expectedChunks = Math.ceil(totalItems / chunkSize);
-        const processedChunks = Math.ceil(processedItems / chunkSize);
-
-        console.log(
-          `Expected chunks: ${expectedChunks}, Processed chunks: ${processedChunks}`
-        );
-
-        if (processedChunks < expectedChunks) {
-          // Resume fetching from where we left off
-          const nextSkip = processedItems;
-          console.log(`Resuming fetch from position ${nextSkip}`);
-          this.enqueueFetch(nextSkip, chunkSize);
-        }
       }
-
-      // Check if we've actually completed but didn't mark as completed
-      if (status === "active" && processedItems >= totalItems) {
-        console.log(
-          "All items processed but transfer not marked complete. Completing now."
-        );
-        await this.updateSessionStatus("completed");
-        this.stopPolling();
-      }
-    } catch (error) {
-      console.error("Error checking transfer status:", error);
     }
   }
 
-  // Modify pollPendingChunks to periodically check transfer status
-  private async pollPendingChunks() {
-    if (!this.polling || !this.session || this.pauseRequested) {
+  // Event-Driven: Check and process pending chunks as needed
+  private async checkAndProcessPendingChunks(): Promise<void> {
+    // If paused or no active session, don't process anything
+    if (this.isProcessingPaused || !this.session || this.pauseRequested) {
       return;
     }
 
     try {
-      // Periodically check transfer status to detect and fix stuck transfers
-      await this.checkTransferStatus();
+      // First check if transfer is already complete
+      await this.checkIfTransferComplete(this.session);
 
       // Don't process more if we're at concurrent limit
       if (this.pendingChunks.size >= MAX_CONCURRENT_CHUNKS) {
-        setTimeout(() => this.pollPendingChunks(), 500);
         return;
       }
 
-      // Get pending chunks
-      const pendingChunks = await db.getPendingChunks(
-        this.session.id,
-        MAX_CONCURRENT_CHUNKS - this.pendingChunks.size
-      );
+      // Check if we need to start more chunk processors
+      const neededProcessors = MAX_CONCURRENT_CHUNKS - this.chunkProcessors;
 
-      // Process each chunk
-      for (const chunk of pendingChunks) {
-        this.processChunk(chunk);
+      if (neededProcessors > 0) {
+        // Start additional chunk processors
+        const pendingChunks = await db.getPendingChunks(
+          this.session.id,
+          neededProcessors
+        );
+
+        // Process each chunk
+        for (const chunk of pendingChunks) {
+          this.processChunk(chunk);
+        }
       }
-
-      // Continue polling
-      setTimeout(() => this.pollPendingChunks(), 500);
     } catch (error) {
-      console.error("Error polling pending chunks:", error);
-      setTimeout(() => this.pollPendingChunks(), RETRY_DELAY);
+      console.error("Error checking for pending chunks:", error);
     }
   }
 
@@ -442,6 +347,7 @@ export class DataTransferService {
 
     // Mark as processing
     this.pendingChunks.add(chunk.id);
+    this.chunkProcessors++;
     await db.updateChunkStatus(chunk.id, "processing");
 
     // Always increment processing count to keep UI updated
@@ -457,70 +363,12 @@ export class DataTransferService {
         error instanceof Error ? error : new Error(String(error)),
         this.session || undefined
       );
-    }
-  }
+    } finally {
+      // When this processor is done, decrement the processor count
+      this.chunkProcessors--;
 
-  // Helper method to update processing count (call this wherever pendingChunks size changes)
-  private setProcessingCount(count: number) {
-    if (this.events.onChunkProcessed) {
-      // This will trigger UI updates for processing chunks count
-      this.events.onChunkProcessed("processing-update", true, 0);
-    }
-  }
-
-  // Add a dedicated method to check if transfer is complete
-  private async checkIfTransferComplete(
-    session: TransferSession
-  ): Promise<void> {
-    // Skip if we don't know the total items
-    if (!session || session.totalItems === null) return;
-
-    try {
-      // Get latest session data
-      const freshSession = await db.getSession(session.id);
-      if (!freshSession || freshSession.totalItems === null) return;
-
-      const { processedItems, totalItems } = freshSession;
-
-      console.log(
-        `Completion check: ${processedItems}/${totalItems} items processed`
-      );
-
-      // Check if we've processed all items
-      if (processedItems >= totalItems) {
-        console.log(`All ${totalItems} items processed, completing transfer`);
-
-        // Quick check to see if there are any pending chunks
-        const pendingChunks = await db.getPendingChunks(session.id, 1);
-
-        if (pendingChunks.length === 0 && this.pendingChunks.size === 0) {
-          console.log("No pending chunks, marking transfer as complete");
-          await this.updateSessionStatus("completed");
-          this.stopPolling();
-
-          if (this.events.onComplete) {
-            this.events.onComplete(freshSession);
-          }
-        } else {
-          console.log(
-            `Found ${pendingChunks.length} pending chunks, waiting for them to complete`
-          );
-        }
-      } else if (
-        this.downloadQueue.length === 0 &&
-        !this.activeDownload &&
-        this.pendingChunks.size === 0
-      ) {
-        // We're still missing items but no activity is happening
-        console.log(
-          `Still missing ${totalItems - processedItems} items but no activity`
-        );
-
-        // Try to restart from where we left off
-        this.enqueueFetch(processedItems, session.chunkSize);
-      }
-    } catch (error) {
-      console.error("Error checking if transfer is complete:", error);
+      // As an event, "emit" the completion of this chunk by checking for more work
+      this.checkAndProcessPendingChunks();
     }
   }
 
@@ -596,7 +444,7 @@ export class DataTransferService {
             );
           }
 
-          // Check if we've completed all chunks
+          // Event-Driven: Check if we've completed all chunks
           await this.checkIfTransferComplete(updatedSession);
         }
       } else {
@@ -617,67 +465,62 @@ export class DataTransferService {
     }
   }
 
-  // Handle chunk processing error
-  private async handleChunkError(
-    chunkId: string,
-    error: Error,
-    session?: TransferSession
-  ) {
-    if (!this.session) return;
+  // Add a dedicated method to check if transfer is complete
+  private async checkIfTransferComplete(
+    session: TransferSession
+  ): Promise<void> {
+    // Skip if we don't know the total items
+    if (!session || session.totalItems === null) return;
 
     try {
-      const chunk = await db.getChunk(chunkId);
-      if (!chunk) return;
+      // Get latest session data
+      const freshSession = await db.getSession(session.id);
+      if (!freshSession || freshSession.totalItems === null) return;
 
-      // Update chunk status
-      await db.updateChunkStatus(chunkId, "failed", error.message);
+      const { processedItems, totalItems } = freshSession;
 
-      // Notify of chunk failure
-      if (this.events.onChunkProcessed) {
-        this.events.onChunkProcessed(chunkId, false, chunk.items.length);
-      }
+      console.log(
+        `Completion check: ${processedItems}/${totalItems} items processed`
+      );
 
-      // Increment retry count
-      this.retryCount++;
+      // Check if we've processed all items
+      if (processedItems >= totalItems) {
+        console.log(`All ${totalItems} items processed, completing transfer`);
 
-      if (this.retryCount < MAX_RETRIES) {
-        // Retry the chunk after a delay
-        console.log(
-          `Retrying chunk ${chunkId} after delay (attempt ${this.retryCount})`
-        );
-        setTimeout(async () => {
-          await db.updateChunkStatus(chunkId, "pending");
-          this.pendingChunks.delete(chunkId);
-        }, RETRY_DELAY);
-      } else {
-        // Too many retries, fail the transfer
-        console.error(
-          `Too many retries (${this.retryCount}). Failing transfer.`
-        );
-        await this.updateSessionStatus(
-          "failed",
-          `Failed after ${MAX_RETRIES} retries: ${error.message}`
-        );
+        // Quick check to see if there are any pending chunks
+        const pendingChunks = await db.getPendingChunks(session.id, 1);
 
-        if (this.events.onError) {
-          this.events.onError(
-            new Error(
-              `Transfer failed after ${MAX_RETRIES} retries: ${error.message}`
-            ),
-            session || undefined
+        if (pendingChunks.length === 0 && this.pendingChunks.size === 0) {
+          console.log("No pending chunks, marking transfer as complete");
+          await this.updateSessionStatus("completed");
+
+          // Pause processing since we're done
+          this.pauseProcessing();
+
+          if (this.events.onComplete) {
+            this.events.onComplete(freshSession);
+          }
+        } else {
+          console.log(
+            `Found ${pendingChunks.length} pending chunks, waiting for them to complete`
           );
         }
+      } else if (
+        this.downloadQueue.length === 0 &&
+        !this.activeDownload &&
+        this.pendingChunks.size === 0 &&
+        this.chunkProcessors === 0
+      ) {
+        // We're still missing items but no activity is happening
+        console.log(
+          `Still missing ${totalItems - processedItems} items but no activity`
+        );
 
-        this.cleanup();
+        // Try to restart from where we left off
+        this.enqueueFetch(processedItems, session.chunkSize);
       }
     } catch (error) {
-      console.error("Error handling chunk error:", error);
-      if (this.events.onError) {
-        this.events.onError(
-          error instanceof Error ? error : new Error(String(error)),
-          session || undefined
-        );
-      }
+      console.error("Error checking if transfer is complete:", error);
     }
   }
 
@@ -848,6 +691,9 @@ export class DataTransferService {
           `Got partial page (${items.length} < ${top}) and no total, assuming done`
         );
       }
+
+      // Event-Driven: Trigger a check for pending chunks since new chunks were added
+      this.checkAndProcessPendingChunks();
     } catch (error: unknown) {
       // Type error as unknown
       if (error instanceof Error && error.name === "AbortError") {
@@ -942,14 +788,79 @@ export class DataTransferService {
     }
   }
 
+  // Handle chunk processing error
+  private async handleChunkError(
+    chunkId: string,
+    error: Error,
+    session?: TransferSession
+  ) {
+    if (!this.session) return;
+
+    try {
+      const chunk = await db.getChunk(chunkId);
+      if (!chunk) return;
+
+      // Update chunk status
+      await db.updateChunkStatus(chunkId, "failed", error.message);
+
+      // Notify of chunk failure
+      if (this.events.onChunkProcessed) {
+        this.events.onChunkProcessed(chunkId, false, chunk.items.length);
+      }
+
+      // Increment retry count
+      this.retryCount++;
+
+      if (this.retryCount < MAX_RETRIES) {
+        // Retry the chunk after a delay
+        console.log(
+          `Retrying chunk ${chunkId} after delay (attempt ${this.retryCount})`
+        );
+        setTimeout(async () => {
+          await db.updateChunkStatus(chunkId, "pending");
+          this.pendingChunks.delete(chunkId);
+        }, RETRY_DELAY);
+      } else {
+        // Too many retries, fail the transfer
+        console.error(
+          `Too many retries (${this.retryCount}). Failing transfer.`
+        );
+        await this.updateSessionStatus(
+          "failed",
+          `Failed after ${MAX_RETRIES} retries: ${error.message}`
+        );
+
+        if (this.events.onError) {
+          this.events.onError(
+            new Error(
+              `Transfer failed after ${MAX_RETRIES} retries: ${error.message}`
+            ),
+            session || undefined
+          );
+        }
+
+        this.cleanup();
+      }
+    } catch (error) {
+      console.error("Error handling chunk error:", error);
+      if (this.events.onError) {
+        this.events.onError(
+          error instanceof Error ? error : new Error(String(error)),
+          session || undefined
+        );
+      }
+    }
+  }
+
   // Clean up all resources
   private cleanup() {
     // Reset state
     this.pendingChunks.clear();
-    this.pauseRequested = false;
-    this.polling = false;
+    this.pauseRequested = true;
+    this.isProcessingPaused = true;
     this.retryCount = 0;
     this.downloadQueue = [];
+    this.chunkProcessors = 0;
 
     if (this.activeDownload) {
       this.activeDownload.abort();
@@ -963,6 +874,13 @@ export class DataTransferService {
   public unmount() {
     window.removeEventListener("beforeunload", this.handleBeforeUnload);
     this.cleanup();
+  }
+
+  // Helper methods removed from the code above
+  private setProcessingCount(count: number) {
+    if (this.events.onChunkProcessed) {
+      this.events.onChunkProcessed("processing-update", true, 0);
+    }
   }
 
   // Function to update session with higher priority
@@ -991,6 +909,57 @@ export class DataTransferService {
     } catch (error) {
       console.error("Error forcing progress update:", error);
     }
+  }
+
+  // Update the session status
+  private async updateSessionStatus(
+    status: TransferSession["status"],
+    error?: string
+  ): Promise<TransferSession> {
+    if (!this.session) {
+      throw new Error("No active session");
+    }
+
+    try {
+      this.session = await db.updateSession(this.session.id, { status, error });
+
+      // Notify status change
+      if (this.events.onStatusChange) {
+        this.events.onStatusChange(status, this.session);
+      }
+
+      // Handle completion
+      if (status === "completed" && this.events.onComplete) {
+        this.events.onComplete(this.session);
+        this.cleanup();
+      }
+
+      return this.session;
+    } catch (error) {
+      console.error("Error updating session status:", error);
+      throw error;
+    }
+  }
+
+  // Get the current session
+  public async getCurrentSession(): Promise<TransferSession | null> {
+    if (this.session) {
+      return this.session;
+    }
+
+    // Try to get from database
+    try {
+      const session = await db.getActiveSession();
+      return session || null; // Convert undefined to null explicitly
+    } catch (error) {
+      console.error("Error getting current session:", error);
+      return null;
+    }
+  }
+
+  // Check if a transfer is in progress
+  public isTransferInProgress(): boolean {
+    return !!this.session && this.session.status === "active";
   }
 }
 
