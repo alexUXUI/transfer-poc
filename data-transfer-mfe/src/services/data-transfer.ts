@@ -1,11 +1,4 @@
 import { db, TransferSession, DataChunk } from "./db";
-import {
-  isServiceWorkerSupported,
-  registerServiceWorker,
-  isServiceWorkerActive,
-  sendChunkToServiceWorker,
-  setupServiceWorkerMessageListener,
-} from "./service-worker";
 
 // Constants for configuration
 const DEFAULT_CHUNK_SIZE = 100;
@@ -35,7 +28,6 @@ export interface TransferEvents {
 // Main class for managing data transfers
 export class DataTransferService {
   private session: TransferSession | null = null;
-  private messageListenerCleanup: (() => void) | null = null;
   private polling = false;
   private pauseRequested = false;
   private retryCount = 0;
@@ -51,25 +43,6 @@ export class DataTransferService {
 
   // Initialize the service
   private async init() {
-    // Register the service worker if needed and wait for it to be ready
-    if (isServiceWorkerSupported) {
-      console.log("Initializing service worker...");
-
-      const registration = await registerServiceWorker();
-
-      if (!registration || !registration.active) {
-        console.warn("Service worker registration failed or not activated yet");
-
-        // Try again after a delay
-        setTimeout(async () => {
-          console.log("Retrying service worker registration...");
-          await registerServiceWorker();
-        }, 1000);
-      } else {
-        console.log("Service worker is active and ready");
-      }
-    }
-
     // Check for any active session on initialization
     try {
       const activeSession = await db.getActiveSession();
@@ -79,7 +52,6 @@ export class DataTransferService {
 
         // Set up event handling if session is active
         if (activeSession.status === "active") {
-          this.setupEventHandling();
           this.startPolling();
         }
       }
@@ -89,86 +61,7 @@ export class DataTransferService {
 
     // Set up beforeunload event to warn user if transfer is in progress
     window.addEventListener("beforeunload", this.handleBeforeUnload);
-
-    // Add a periodic check for service worker health
-    if (isServiceWorkerSupported) {
-      setInterval(async () => {
-        const isActive = await isServiceWorkerActive();
-        console.log(
-          `Service worker health check: ${isActive ? "active" : "inactive"}`
-        );
-
-        // If we have a session but the service worker is gone, we need to handle that
-        if (!isActive && this.session && this.session.status === "active") {
-          console.warn(
-            "Service worker is inactive but transfer is active - attempting to recover"
-          );
-
-          // Try to re-register the service worker
-          await registerServiceWorker();
-        }
-      }, 30000); // Check every 30 seconds
-    }
   }
-
-  // Set up service worker event handling
-  private setupEventHandling() {
-    if (isServiceWorkerSupported) {
-      // Remove any existing listener
-      if (this.messageListenerCleanup) {
-        this.messageListenerCleanup();
-      }
-
-      // Add new listener
-      this.messageListenerCleanup = setupServiceWorkerMessageListener(
-        this.handleServiceWorkerMessage
-      );
-    }
-  }
-
-  // Handle messages from the service worker
-  private handleServiceWorkerMessage = (event: MessageEvent) => {
-    const { type, data } = event.data || {};
-
-    console.log(`Received message from service worker: ${type}`, data);
-
-    if (type === "TRANSFER_CHUNK_RESULT") {
-      console.log(
-        `WORKER: Received chunk result for ${data.chunkId}, success: ${data.success}`
-      );
-
-      this.handleChunkResult(
-        data.chunkId,
-        data.success,
-        data.result,
-        data.error
-      );
-    } else if (type === "TRANSFER_ERROR") {
-      console.error(`WORKER: Transfer error: ${data.error}`);
-
-      if (this.events.onError && this.session) {
-        this.events.onError(
-          new Error(data.error || "Unknown service worker error"),
-          this.session
-        );
-      }
-    } else if (type === "TRANSFER_PROGRESS") {
-      console.log(`WORKER: Progress update: ${data.processed}/${data.total}`);
-
-      // Forward progress updates to the UI
-      if (this.events.onProgress && data.processed !== undefined) {
-        this.events.onProgress(
-          data.processed,
-          data.total || null,
-          data.percentage || null
-        );
-      }
-    } else if (type === "PING_RESPONSE") {
-      console.log("WORKER: Service worker ping response received");
-    } else {
-      console.log(`WORKER: Unhandled message type: ${type}`);
-    }
-  };
 
   // Handle beforeunload event to warn user if transfer is in progress
   private handleBeforeUnload = (event: BeforeUnloadEvent) => {
@@ -197,31 +90,6 @@ export class DataTransferService {
     chunkSize = DEFAULT_CHUNK_SIZE
   ): Promise<TransferSession> {
     try {
-      // Try to register service worker, but don't make it critical
-      if (isServiceWorkerSupported) {
-        try {
-          console.log("Checking for active service worker...");
-          const registration = await navigator.serviceWorker.getRegistration();
-
-          if (!registration || !registration.active) {
-            console.log("No active service worker found, registering now...");
-            await registerServiceWorker();
-          } else {
-            console.log("Service worker is already registered and active");
-          }
-        } catch (swError) {
-          // Log but continue even if service worker fails
-          console.warn(
-            "Service worker setup failed, will use direct API calls:",
-            swError
-          );
-        }
-      } else {
-        console.warn(
-          "Service workers not supported in this browser, will use direct API calls"
-        );
-      }
-
       // Check for existing active session
       const existingSession = await db.getActiveSession();
       if (existingSession) {
@@ -238,9 +106,6 @@ export class DataTransferService {
         totalItems: null,
         chunkSize,
       });
-
-      // Set up event handling for service worker messages if possible
-      this.setupEventHandling();
 
       // Notify of session creation
       if (this.events.onSessionCreated) {
@@ -319,7 +184,6 @@ export class DataTransferService {
     try {
       this.pauseRequested = false;
       await this.updateSessionStatus("active");
-      this.setupEventHandling();
       this.startPolling();
 
       // Resume from where we left off
@@ -556,61 +420,8 @@ export class DataTransferService {
     this.setProcessingCount(this.pendingChunks.size);
 
     try {
-      const url = window.location.href;
-
-      // Special case: Enable service worker mode for localhost:2000/transfer for testing
-      // This is specifically to test service worker on the route you requested
-      const forceServiceWorker =
-        localStorage.getItem("useServiceWorker") === "true" ||
-        url.includes("localhost:2000/transfer");
-
-      // Check if service worker should be used
-      let useServiceWorker = false;
-
-      if (forceServiceWorker) {
-        try {
-          const swActive = await isServiceWorkerActive();
-          useServiceWorker = swActive;
-          if (swActive) {
-            console.log(
-              "Service worker is active and will be used for processing"
-            );
-          } else {
-            console.log(
-              "Service worker requested but not active, falling back to direct"
-            );
-          }
-        } catch (swError) {
-          console.warn("Error checking service worker:", swError);
-        }
-      }
-
-      console.log(
-        `Using ${
-          useServiceWorker ? "SERVICE WORKER" : "direct"
-        } processing for chunk ${chunk.id}`
-      );
-
-      // If service worker is not active or not requested, use direct method
-      if (!useServiceWorker) {
-        await this.processChunkDirectly(chunk);
-        return;
-      }
-
-      // Service worker approach requested and available
-      try {
-        console.log(`Sending chunk ${chunk.id} to service worker`);
-        await sendChunkToServiceWorker(
-          chunk.id,
-          chunk.items,
-          this.session.targetUrl
-        );
-        console.log(`Successfully sent chunk ${chunk.id} to service worker`);
-      } catch (swError) {
-        // Fallback to direct method on service worker error
-        console.warn("Service worker error, using direct method:", swError);
-        await this.processChunkDirectly(chunk);
-      }
+      // We'll always use the direct method now
+      await this.processChunkDirectly(chunk);
     } catch (error) {
       console.error("Error processing chunk:", error);
       await this.handleChunkError(
@@ -626,6 +437,62 @@ export class DataTransferService {
     if (this.events.onChunkProcessed) {
       // This will trigger UI updates for processing chunks count
       this.events.onChunkProcessed("processing-update", true, 0);
+    }
+  }
+
+  // Add a dedicated method to check if transfer is complete
+  private async checkIfTransferComplete(
+    session: TransferSession
+  ): Promise<void> {
+    // Skip if we don't know the total items
+    if (!session || session.totalItems === null) return;
+
+    try {
+      // Get latest session data
+      const freshSession = await db.getSession(session.id);
+      if (!freshSession || freshSession.totalItems === null) return;
+
+      const { processedItems, totalItems } = freshSession;
+
+      console.log(
+        `Completion check: ${processedItems}/${totalItems} items processed`
+      );
+
+      // Check if we've processed all items
+      if (processedItems >= totalItems) {
+        console.log(`All ${totalItems} items processed, completing transfer`);
+
+        // Quick check to see if there are any pending chunks
+        const pendingChunks = await db.getPendingChunks(session.id, 1);
+
+        if (pendingChunks.length === 0 && this.pendingChunks.size === 0) {
+          console.log("No pending chunks, marking transfer as complete");
+          await this.updateSessionStatus("completed");
+          this.stopPolling();
+
+          if (this.events.onComplete) {
+            this.events.onComplete(freshSession);
+          }
+        } else {
+          console.log(
+            `Found ${pendingChunks.length} pending chunks, waiting for them to complete`
+          );
+        }
+      } else if (
+        this.downloadQueue.length === 0 &&
+        !this.activeDownload &&
+        this.pendingChunks.size === 0
+      ) {
+        // We're still missing items but no activity is happening
+        console.log(
+          `Still missing ${totalItems - processedItems} items but no activity`
+        );
+
+        // Try to restart from where we left off
+        this.enqueueFetch(processedItems, session.chunkSize);
+      }
+    } catch (error) {
+      console.error("Error checking if transfer is complete:", error);
     }
   }
 
@@ -719,62 +586,6 @@ export class DataTransferService {
           this.session || undefined
         );
       }
-    }
-  }
-
-  // Add a dedicated method to check if transfer is complete
-  private async checkIfTransferComplete(
-    session: TransferSession
-  ): Promise<void> {
-    // Skip if we don't know the total items
-    if (!session || session.totalItems === null) return;
-
-    try {
-      // Get latest session data
-      const freshSession = await db.getSession(session.id);
-      if (!freshSession || freshSession.totalItems === null) return;
-
-      const { processedItems, totalItems } = freshSession;
-
-      console.log(
-        `Completion check: ${processedItems}/${totalItems} items processed`
-      );
-
-      // Check if we've processed all items
-      if (processedItems >= totalItems) {
-        console.log(`All ${totalItems} items processed, completing transfer`);
-
-        // Quick check to see if there are any pending chunks
-        const pendingChunks = await db.getPendingChunks(session.id, 1);
-
-        if (pendingChunks.length === 0 && this.pendingChunks.size === 0) {
-          console.log("No pending chunks, marking transfer as complete");
-          await this.updateSessionStatus("completed");
-          this.stopPolling();
-
-          if (this.events.onComplete) {
-            this.events.onComplete(freshSession);
-          }
-        } else {
-          console.log(
-            `Found ${pendingChunks.length} pending chunks, waiting for them to complete`
-          );
-        }
-      } else if (
-        this.downloadQueue.length === 0 &&
-        !this.activeDownload &&
-        this.pendingChunks.size === 0
-      ) {
-        // We're still missing items but no activity is happening
-        console.log(
-          `Still missing ${totalItems - processedItems} items but no activity`
-        );
-
-        // Try to restart from where we left off
-        this.enqueueFetch(processedItems, session.chunkSize);
-      }
-    } catch (error) {
-      console.error("Error checking if transfer is complete:", error);
     }
   }
 
@@ -1038,47 +849,13 @@ export class DataTransferService {
     }
   }
 
-  // Clean up all resources
-  private cleanup() {
-    // Remove event listeners
-    if (this.messageListenerCleanup) {
-      this.messageListenerCleanup();
-      this.messageListenerCleanup = null;
-    }
-
-    // Reset state
-    this.pendingChunks.clear();
-    this.pauseRequested = false;
-    this.polling = false;
-    this.retryCount = 0;
-    this.downloadQueue = [];
-
-    if (this.activeDownload) {
-      this.activeDownload.abort();
-      this.activeDownload = null;
-    }
-
-    // Don't reset session to allow querying final status
-  }
-
-  // Clean up when unmounting
-  public unmount() {
-    window.removeEventListener("beforeunload", this.handleBeforeUnload);
-
-    // Don't cancel the transfer, just clean up the listeners
-    if (this.messageListenerCleanup) {
-      this.messageListenerCleanup();
-      this.messageListenerCleanup = null;
-    }
-  }
-
-  // This is a direct processing method that bypasses the service worker
+  // This is the direct processing method (previously was a fallback, now it's the only method)
   private async processChunkDirectly(chunk: DataChunk): Promise<void> {
     if (!this.session) return;
 
     // Log the operation
     console.log(
-      `DIRECT: Processing chunk ${chunk.id} with ${chunk.items.length} items`
+      `Processing chunk ${chunk.id} with ${chunk.items.length} items`
     );
 
     try {
@@ -1099,90 +876,41 @@ export class DataTransferService {
 
       // 3. Parse the response
       const result = await response.json();
-      console.log(`DIRECT: Success for chunk ${chunk.id}`, result);
+      console.log(`Success for chunk ${chunk.id}`, result);
 
-      // 4. Mark the chunk as completed
-      await db.updateChunkStatus(chunk.id, "completed");
-
-      // 5. Get the current processed count
-      const itemCount = chunk.items.length;
-
-      // 6. Get fresh session data to ensure accurate counting
-      const freshSession = await db.getSession(this.session.id);
-      if (!freshSession) {
-        throw new Error("Session not found when updating processed count");
-      }
-
-      // 7. Calculate new count
-      const newProcessedCount = freshSession.processedItems + itemCount;
-
-      // 8. Cap the count at the total items if known
-      const finalCount =
-        freshSession.totalItems !== null
-          ? Math.min(newProcessedCount, freshSession.totalItems)
-          : newProcessedCount;
-
-      // 9. Update the session with the new count
-      const updatedSession = await db.updateSession(this.session.id, {
-        processedItems: finalCount,
-        lastChunkId: chunk.id,
-      });
-
-      // 10. Update our local reference
-      this.session = updatedSession;
-
-      // 11. Notify the UI of the updated progress
-      console.log(`DIRECT: Updated progress to ${finalCount} items`);
-
-      if (this.events.onProgress) {
-        const percentage = updatedSession.totalItems
-          ? Math.round((finalCount / updatedSession.totalItems) * 100)
-          : null;
-
-        this.events.onProgress(
-          finalCount,
-          updatedSession.totalItems,
-          percentage
-        );
-      }
-
-      // 12. Remove from pending chunks
-      this.pendingChunks.delete(chunk.id);
-
-      // 13. Reset retry count
-      this.retryCount = 0;
-
-      // 14. Check if we've completed all items
-      if (
-        updatedSession.totalItems !== null &&
-        finalCount >= updatedSession.totalItems
-      ) {
-        console.log(
-          `DIRECT: All ${updatedSession.totalItems} items processed, completing transfer`
-        );
-        await this.updateSessionStatus("completed");
-      }
+      // 4. Handle the successful result
+      await this.handleChunkResult(chunk.id, true, result);
     } catch (error) {
-      console.error(`DIRECT: Error processing chunk ${chunk.id}:`, error);
-
-      // Handle retry logic
-      this.retryCount++;
-      if (this.retryCount < MAX_RETRIES) {
-        console.log(
-          `DIRECT: Will retry chunk ${chunk.id} (attempt ${this.retryCount})`
-        );
-        setTimeout(async () => {
-          await db.updateChunkStatus(chunk.id, "pending");
-          this.pendingChunks.delete(chunk.id);
-        }, RETRY_DELAY);
-      } else {
-        await this.handleChunkError(
-          chunk.id,
-          error instanceof Error ? error : new Error(String(error)),
-          this.session || undefined
-        );
-      }
+      console.error(`Error processing chunk ${chunk.id}:`, error);
+      await this.handleChunkError(
+        chunk.id,
+        error instanceof Error ? error : new Error(String(error)),
+        this.session || undefined
+      );
     }
+  }
+
+  // Clean up all resources
+  private cleanup() {
+    // Reset state
+    this.pendingChunks.clear();
+    this.pauseRequested = false;
+    this.polling = false;
+    this.retryCount = 0;
+    this.downloadQueue = [];
+
+    if (this.activeDownload) {
+      this.activeDownload.abort();
+      this.activeDownload = null;
+    }
+
+    // Don't reset session to allow querying final status
+  }
+
+  // Clean up when unmounting
+  public unmount() {
+    window.removeEventListener("beforeunload", this.handleBeforeUnload);
+    this.cleanup();
   }
 
   // Function to update session with higher priority

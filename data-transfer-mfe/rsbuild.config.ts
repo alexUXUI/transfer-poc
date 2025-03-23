@@ -16,14 +16,6 @@ export default defineConfig({
       },
     }),
   ],
-  output: {
-    copy: [
-      {
-        from: "public/service-worker.js",
-        to: ".",
-      },
-    ],
-  },
   source: {
     // Any source configuration you need
   },
@@ -34,13 +26,7 @@ export default defineConfig({
     port: 2001,
     cors: true,
     headers: {
-      // CORS headers for cross-origin access
       "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type",
-
-      // Service Worker header - essential for cross-origin service worker
-      "Service-Worker-Allowed": "*",
     },
   },
 });
