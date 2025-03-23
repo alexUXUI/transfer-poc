@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Server Interaction Test</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        max-width: 800px;
+        margin: 0 auto;
+        padding: 20px;
+      }
+      .container {
+        display: flex;
+        gap: 20px;
+      }
+      .panel {
+        flex: 1;
+        border: 1px solid #ccc;
+        border-radius: 5px;
+        padding: 15px;
+      }
+      button {
+        padding: 8px 16px;
+        background-color: #4caf50;
+        color: white;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+        margin: 5px 0;
+      }
+      button:hover {
+        background-color: #45a049;
+      }
+      pre {
+        background-color: #f5f5f5;
+        padding: 10px;
+        border-radius: 5px;
+        max-height: 300px;
+        overflow: auto;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Data Transfer Between Servers</h1>
+
+    <div class="container">
+      <div class="panel">
+        <h2>Source Server (3000)</h2>
+        <div>
+          <label for="skipInput">Skip:</label>
+          <input type="number" id="skipInput" value="0" min="0" />
+          <label for="topInput">Top:</label>
+          <input type="number" id="topInput" value="10" min="1" />
+        </div>
+        <button id="fetchDataBtn">Fetch Data</button>
+        <p>Items fetched: <span id="itemCount">0</span></p>
+        <pre id="sourceOutput">Results will appear here...</pre>
+      </div>
+
+      <div class="panel">
+        <h2>Receiver Server (3001)</h2>
+        <button id="transferDataBtn" disabled>Transfer Data</button>
+        <button id="checkStatsBtn">Check Stats</button>
+        <pre id="receiverOutput">Results will appear here...</pre>
+      </div>
+    </div>
+
+    <script>
+      // DOM elements
+      const skipInput = document.getElementById("skipInput");
+      const topInput = document.getElementById("topInput");
+      const fetchDataBtn = document.getElementById("fetchDataBtn");
+      const transferDataBtn = document.getElementById("transferDataBtn");
+      const checkStatsBtn = document.getElementById("checkStatsBtn");
+      const itemCountEl = document.getElementById("itemCount");
+      const sourceOutput = document.getElementById("sourceOutput");
+      const receiverOutput = document.getElementById("receiverOutput");
+
+      // Store fetched data
+      let fetchedData = [];
+
+      // Fetch data from source server
+      fetchDataBtn.addEventListener("click", async () => {
+        try {
+          const skip = skipInput.value;
+          const top = topInput.value;
+
+          sourceOutput.textContent = "Fetching data...";
+
+          const response = await fetch(
+            `http://localhost:3000/specification?skip=${skip}&top=${top}`
+          );
+          const result = await response.json();
+
+          fetchedData = result.data;
+          itemCountEl.textContent = fetchedData.length;
+
+          sourceOutput.textContent =
+            JSON.stringify(result, null, 2).substring(0, 1000) + "...";
+          transferDataBtn.disabled = fetchedData.length === 0;
+        } catch (error) {
+          sourceOutput.textContent = `Error: ${error.message}`;
+        }
+      });
+
+      // Transfer data to receiver server
+      transferDataBtn.addEventListener("click", async () => {
+        try {
+          if (fetchedData.length === 0) {
+            receiverOutput.textContent =
+              "No data to transfer. Fetch data first.";
+            return;
+          }
+
+          receiverOutput.textContent = "Transferring data...";
+
+          const response = await fetch("http://localhost:3001/upload", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify(fetchedData),
+          });
+
+          const result = await response.json();
+          receiverOutput.textContent = JSON.stringify(result, null, 2);
+        } catch (error) {
+          receiverOutput.textContent = `Error: ${error.message}`;
+        }
+      });
+
+      // Check stats on receiver server
+      checkStatsBtn.addEventListener("click", async () => {
+        try {
+          receiverOutput.textContent = "Checking stats...";
+
+          const response = await fetch("http://localhost:3001/stats");
+          const result = await response.json();
+
+          receiverOutput.textContent = JSON.stringify(result, null, 2);
+        } catch (error) {
+          receiverOutput.textContent = `Error: ${error.message}`;
+        }
+      });
+    </script>
+  </body>
+</html>

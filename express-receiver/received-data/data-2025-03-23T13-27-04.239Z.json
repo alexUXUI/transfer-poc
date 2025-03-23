@@ -1,0 +1,10 @@
+[
+  {
+    "id": "item1",
+    "value": "test value"
+  },
+  {
+    "id": "item2",
+    "value": "another value"
+  }
+]

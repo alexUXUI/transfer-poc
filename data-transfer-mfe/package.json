@@ -1,0 +1,27 @@
+{
+  "name": "data-transfer-mfe",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "rsbuild build",
+    "check": "biome check --write",
+    "dev": "rsbuild dev --open",
+    "format": "biome format --write",
+    "preview": "rsbuild preview"
+  },
+  "dependencies": {
+    "@module-federation/bridge-react": "^0.11.1",
+    "@module-federation/rsbuild-plugin": "^0.11.1",
+    "react": "^18.0.0",
+    "react-dom": "^18.0.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
+    "@rsbuild/core": "^1.2.16",
+    "@rsbuild/plugin-react": "^1.1.1",
+    "@types/react": "^18.0.10",
+    "@types/react-dom": "^18.0.4",
+    "typescript": "^5.8.2"
+  }
+}
