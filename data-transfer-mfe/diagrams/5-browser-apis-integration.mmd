@@ -1,0 +1,66 @@
+sequenceDiagram
+    participant UI as UI Component
+    participant DTS as DataTransferService
+    participant IDB as IndexedDB API
+    participant Fetch as Fetch API
+    
+    UI->>DTS: startTransfer(sourceUrl, targetUrl)
+    DTS->>IDB: createSession()
+    IDB-->>DTS: session
+    DTS->>UI: onSessionCreated event
+    
+    DTS->>IDB: updateSessionStatus("active")
+    DTS->>DTS: resumeProcessing()
+    DTS->>DTS: enqueueFetch(0, chunkSize)
+    
+    loop Process Download Queue
+        DTS->>DTS: processDownloadQueue()
+        DTS->>DTS: fetchData(skip, top)
+        
+        Note over DTS,Fetch: Synthetic delay (3s) added for testing
+        
+        DTS->>Fetch: fetch(sourceUrl + "?skip=" + skip + "&top=" + top)
+        Fetch-->>DTS: response
+        DTS->>DTS: Parse JSON
+        
+        DTS->>IDB: addChunk(session.id, items)
+        IDB-->>DTS: chunk
+        
+        DTS->>UI: forceProgressUpdate
+        
+        DTS->>DTS: checkAndProcessPendingChunks()
+    end
+    
+    loop Process Pending Chunks
+        DTS->>IDB: getPendingChunks(session.id, neededProcessors)
+        IDB-->>DTS: pendingChunks
+        
+        loop For each chunk
+            DTS->>IDB: updateChunkStatus(chunk.id, "processing")
+            
+            Note over DTS,Fetch: Synthetic delay (10s) added for testing
+            
+            DTS->>Fetch: fetch(targetUrl, { method: 'POST', body: chunk.items })
+            Fetch-->>DTS: response
+            
+            alt Success
+                DTS->>IDB: updateChunkStatus(chunk.id, "completed")
+                DTS->>IDB: updateSession(processedItems += chunk.items.length)
+                DTS->>UI: onProgress event
+            else Failure
+                DTS->>IDB: updateChunkStatus(chunk.id, "failed")
+                DTS->>UI: onChunkProcessed event (failure)
+                DTS->>DTS: Retry logic
+            end
+            
+            DTS->>DTS: checkAndProcessPendingChunks()
+        end
+    end
+    
+    DTS->>IDB: checkIfTransferComplete
+    IDB-->>DTS: session data
+    
+    alt All items processed
+        DTS->>IDB: updateSessionStatus("completed")
+        DTS->>UI: onComplete event
+    end 

@@ -1,0 +1,24 @@
+stateDiagram-v2
+    [*] --> Initializing: Create session
+    Initializing --> Active: Start transfer
+    
+    Active --> Paused: User pauses
+    Paused --> Active: User resumes
+    
+    Active --> Completed: All items processed
+    Active --> Failed: Error or cancellation
+    
+    state Active {
+        [*] --> Processing: Check for pending chunks
+        Processing --> Fetching: Need more data
+        Fetching --> Processing: Create chunks
+        Processing --> [*]: No more work
+    }
+    
+    state Paused {
+        [*] --> Paused_State
+        Paused_State: - pauseRequested = true
+        Paused_State: - isProcessingPaused = true
+        Paused_State: - Download aborted
+        Paused_State: - Queue cleared
+    } 

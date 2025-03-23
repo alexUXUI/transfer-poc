@@ -1,0 +1,23 @@
+graph TD
+    subgraph "Source Server"
+        A[Data Source API]
+    end
+    
+    subgraph "Browser"
+        B[UI Component] --> C[DataTransferService]
+        C --> D[IndexedDB for Persistence]
+        C --> E[Fetch API for Network Requests]
+        D --> F[transferSessions Store]
+        D --> G[dataChunks Store]
+    end
+    
+    subgraph "Target Server"
+        H[Data Target API]
+    end
+    
+    A -->|1. Fetch data in chunks| E
+    E -->|2. Store in| G
+    G -->|3. Process chunks| C
+    C -->|4. Post chunks| E
+    E -->|5. Upload to| H
+    C -->|6. Update progress| B 

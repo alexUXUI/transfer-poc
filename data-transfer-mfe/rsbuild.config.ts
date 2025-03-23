@@ -10,23 +10,24 @@ export default defineConfig({
       exposes: {
         "./export-app": "./src/export-app.tsx",
       },
-      shared: ["react", "react-dom"],
+      shared: {
+        react: { singleton: true, eager: true },
+        "react-dom": { singleton: true, eager: true },
+      },
+      dts: false,
     }),
   ],
-  output: {
-    copy: [
-      {
-        from: "./public/service-worker.js",
-        to: "service-worker.js",
-      },
-    ],
-  },
   source: {
-    alias: {
-      // Add any aliases you need here
-    },
+    // Any source configuration you need
+  },
+  dev: {
+    assetPrefix: "auto",
   },
   server: {
     port: 2001,
+    cors: true,
+    headers: {
+      "Access-Control-Allow-Origin": "*",
+    },
   },
 });

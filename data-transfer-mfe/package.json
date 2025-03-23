@@ -24,6 +24,7 @@
     "@rsbuild/plugin-react": "^1.1.1",
     "@types/react": "^18.0.10",
     "@types/react-dom": "^18.0.4",
-    "typescript": "^5.8.2"
+    "typescript": "^5.8.2",
+    "worker-rspack-loader": "^3.1.2"
   }
 }

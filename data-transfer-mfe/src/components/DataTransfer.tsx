@@ -1,7 +1,6 @@
 import React, { useEffect, useState, useCallback } from "react";
 import { dataTransferService, TransferEvents } from "../services/data-transfer";
 import { TransferSession } from "../services/db";
-import { isServiceWorkerSupported } from "../services/service-worker";
 
 // Constants
 const SOURCE_URL = "http://localhost:3000/specification";
@@ -44,14 +43,12 @@ const DataTransfer: React.FC<DataTransferProps> = ({ onUnmount }) => {
 
   // Check if the browser is supported
   useEffect(() => {
-    // Service workers and IndexedDB are required
-    const isSupported = isServiceWorkerSupported && "indexedDB" in window;
+    // IndexedDB is required
+    const isSupported = "indexedDB" in window;
     setIsBrowserSupported(isSupported);
 
     if (!isSupported) {
-      setError(
-        "Your browser does not support required features (Service Workers and IndexedDB)."
-      );
+      setError("Your browser does not support required features (IndexedDB).");
     }
   }, []);
 
@@ -83,6 +80,7 @@ const DataTransfer: React.FC<DataTransferProps> = ({ onUnmount }) => {
       },
 
       onProgress: (processed, total, percent) => {
+        // Simply apply the progress values directly - no calculation or extra logic
         setProcessedItems(processed);
         if (total !== null) setTotalItems(total);
         if (percent !== null) setPercentage(percent);
@@ -142,6 +140,88 @@ const DataTransfer: React.FC<DataTransferProps> = ({ onUnmount }) => {
       }
     };
   }, [onUnmount]);
+
+  // Single unified UI refresh effect - SIMPLIFIED
+  useEffect(() => {
+    // Only run if we need to keep the UI updated
+    if (!session) return;
+
+    // Set up an interval to refresh the UI from the database
+    const refreshInterval = setInterval(async () => {
+      try {
+        const currentSession = await dataTransferService.getCurrentSession();
+        if (!currentSession) return;
+
+        // Update all state directly from the database
+        setSession(currentSession);
+        setProcessedItems(currentSession.processedItems);
+
+        if (currentSession.totalItems !== null) {
+          setTotalItems(currentSession.totalItems);
+          // Calculate percentage but don't update separate state for chunks
+          const calcPercentage = Math.round(
+            (currentSession.processedItems / currentSession.totalItems) * 100
+          );
+          setPercentage(calcPercentage);
+        }
+
+        // Calculate chunks directly from the database value
+        const chunkSize = currentSession.chunkSize || 100;
+        const chunks = Math.ceil(currentSession.processedItems / chunkSize);
+        setSuccessfulChunks(chunks);
+      } catch (error) {
+        // Silent error handling
+      }
+    }, 250);
+
+    return () => clearInterval(refreshInterval);
+  }, [session]);
+
+  // Add a reset mechanism when session gets into a bad state
+  useEffect(() => {
+    if (!session) return;
+
+    // Detect if processing is stuck with no activity for a long time
+    let lastProcessedCount = session.processedItems;
+    let stuckCounter = 0;
+
+    const stuckDetector = setInterval(() => {
+      if (session.status !== "active") return;
+
+      // Compare if processedItems has changed
+      if (session.processedItems === lastProcessedCount) {
+        stuckCounter++;
+        if (stuckCounter > 20) {
+          // About 5 seconds with no activity
+          console.log("Processing appears stuck, refreshing component state");
+          // Refresh session data directly from database
+          dataTransferService.getCurrentSession().then((currentSession) => {
+            if (currentSession) {
+              setSession(currentSession);
+              setProcessedItems(currentSession.processedItems);
+              setTotalItems(currentSession.totalItems);
+              if (currentSession.totalItems !== null) {
+                setPercentage(
+                  Math.round(
+                    (currentSession.processedItems /
+                      currentSession.totalItems) *
+                      100
+                  )
+                );
+              }
+            }
+          });
+          stuckCounter = 0;
+        }
+      } else {
+        // Reset counter if we have activity
+        stuckCounter = 0;
+        lastProcessedCount = session.processedItems;
+      }
+    }, 250);
+
+    return () => clearInterval(stuckDetector);
+  }, [session?.id]);
 
   // Start transfer
   const startTransfer = useCallback(async () => {
@@ -226,7 +306,7 @@ const DataTransfer: React.FC<DataTransferProps> = ({ onUnmount }) => {
           <h3>Browser Not Supported</h3>
           <p>
             Your browser does not support the required features for data
-            transfer (Service Workers and IndexedDB).
+            transfer (IndexedDB).
           </p>
           <p>
             Please try using a modern browser like Chrome, Firefox, Edge or
@@ -240,6 +320,21 @@ const DataTransfer: React.FC<DataTransferProps> = ({ onUnmount }) => {
   return (
     <div className="data-transfer-container">
       <h2>Data Transfer</h2>
+
+      <div
+        className="debug-banner"
+        style={{
+          backgroundColor: "#fff3cd",
+          border: "1px solid #ffeeba",
+          color: "#856404",
+          padding: "10px",
+          borderRadius: "4px",
+          marginBottom: "15px",
+          fontWeight: "bold",
+        }}
+      >
+        TESTING MODE: Synthetic delays enabled (3s fetch + 10s processing)
+      </div>
 
       {error && (
         <div className="error-message">
@@ -258,16 +353,23 @@ const DataTransfer: React.FC<DataTransferProps> = ({ onUnmount }) => {
 
           {session && (
             <>
-              <p>
-                <strong>Progress:</strong> {processedItems} items processed
-                {totalItems !== null && ` of ${totalItems}`}
-                {percentage !== null && ` (${percentage}%)`}
-              </p>
+              <div className="progress-details">
+                <p className="progress-count">
+                  <strong>Progress:</strong>{" "}
+                  <span className="progress-numbers">
+                    {processedItems} items processed
+                    {totalItems !== null && ` of ${totalItems}`}
+                  </span>
+                  {percentage !== null && (
+                    <span className="progress-percentage">({percentage}%)</span>
+                  )}
+                </p>
 
-              <p>
-                <strong>Chunks:</strong> {successfulChunks} successful,{" "}
-                {failedChunks} failed, {processingChunks} in progress
-              </p>
+                <p>
+                  <strong>Chunks:</strong> {successfulChunks} successful,{" "}
+                  {failedChunks} failed, {processingChunks} in progress
+                </p>
+              </div>
             </>
           )}
         </div>
@@ -276,7 +378,10 @@ const DataTransfer: React.FC<DataTransferProps> = ({ onUnmount }) => {
           <div className="progress-bar">
             <div
               className="progress-bar-fill"
-              style={{ width: percentage !== null ? `${percentage}%` : "100%" }}
+              style={{
+                width: percentage !== null ? `${percentage}%` : "0%",
+                transition: "width 0.05s linear",
+              }}
             />
             <div className="progress-bar-text">
               {percentage !== null ? `${percentage}%` : "Processing..."}

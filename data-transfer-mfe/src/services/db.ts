@@ -67,6 +67,11 @@ class DataTransferDatabase {
     });
   }
 
+  // Add this function at the beginning of the DataTransferDatabase class
+  private logOperation(operation: string, details: any): void {
+    console.log(`[DB-OPERATION] ${operation}:`, details);
+  }
+
   // Session methods
   async createSession(
     sessionData: Omit<
@@ -98,17 +103,22 @@ class DataTransferDatabase {
     return db.get("transferSessions", sessionId);
   }
 
+  // Then modify the updateSession method to add additional logging
   async updateSession(
     sessionId: string,
     updates: Partial<
       Omit<DataTransferDB["transferSessions"]["value"], "id" | "createdAt">
     >
   ) {
+    this.logOperation("UPDATE-SESSION-START", { sessionId, updates });
+
     const db = await this.db;
     const session = await db.get("transferSessions", sessionId);
 
     if (!session) {
-      throw new Error(`Session not found: ${sessionId}`);
+      const error = `Session not found: ${sessionId}`;
+      this.logOperation("UPDATE-SESSION-ERROR", error);
+      throw new Error(error);
     }
 
     const updatedSession = {
@@ -118,6 +128,7 @@ class DataTransferDatabase {
     };
 
     await db.put("transferSessions", updatedSession);
+    this.logOperation("UPDATE-SESSION-SUCCESS", updatedSession);
     return updatedSession;
   }
 

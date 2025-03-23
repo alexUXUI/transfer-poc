@@ -1,0 +1,8 @@
+stateDiagram-v2
+    [*] --> Pending: Chunk created
+    Pending --> Processing: Processor available
+    Processing --> Completed: API call succeeded
+    Processing --> Failed: API call failed
+    Failed --> Pending: Retry (attempts < 3)
+    Failed --> [*]: Max retries reached
+    Completed --> [*]: Chunk processed 

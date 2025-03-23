@@ -1,0 +1,49 @@
+sequenceDiagram
+    participant SourceServer as Source Server API
+    participant Browser as Web Browser
+    participant FetchAPI as Browser Fetch API
+    participant IndexedDB as Browser IndexedDB
+    participant TargetServer as Target Server API
+    
+    Note over Browser: User initiates data transfer
+    
+    Browser->>IndexedDB: Create TransferSession
+    IndexedDB-->>Browser: Session Created
+    
+    loop Until all data is transferred
+        Browser->>FetchAPI: Fetch data chunk with pagination (skip, top)
+        FetchAPI->>SourceServer: HTTP GET request
+        SourceServer-->>FetchAPI: JSON response with items and totalCount
+        FetchAPI-->>Browser: Process response
+        
+        Browser->>IndexedDB: Store chunk in dataChunks store
+        IndexedDB-->>Browser: Chunk stored with "pending" status
+        
+        par Process chunks in parallel (max 3 concurrent)
+            loop For each pending chunk
+                Browser->>IndexedDB: Query for pending chunks
+                IndexedDB-->>Browser: Return pending chunks
+                
+                Browser->>IndexedDB: Update chunk status to "processing"
+                
+                Browser->>FetchAPI: Send chunk to target server
+                FetchAPI->>TargetServer: HTTP POST with chunk data
+                TargetServer-->>FetchAPI: Process confirmation
+                FetchAPI-->>Browser: Success/failure response
+                
+                alt Successful transfer
+                    Browser->>IndexedDB: Update chunk status to "completed"
+                    Browser->>IndexedDB: Update Session.processedItems count
+                    Browser->>Browser: Check if transfer complete
+                else Failed transfer
+                    Browser->>IndexedDB: Update chunk status to "failed"
+                    Browser->>Browser: Retry logic (up to 3 times)
+                end
+            end
+        end
+    end
+    
+    Browser->>IndexedDB: Update Session status to "completed"
+    IndexedDB-->>Browser: Session updated
+    
+    Note over Browser: Transfer complete notification to user 
