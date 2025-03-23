@@ -51,9 +51,22 @@ export class DataTransferService {
 
   // Initialize the service
   private async init() {
-    // Register the service worker if needed
+    // Register the service worker if needed and wait for it to be ready
     if (isServiceWorkerSupported) {
-      await registerServiceWorker();
+      console.log("Initializing service worker...");
+      const registration = await registerServiceWorker();
+
+      if (!registration || !registration.active) {
+        console.warn("Service worker registration failed or not activated yet");
+
+        // Try again after a delay
+        setTimeout(async () => {
+          console.log("Retrying service worker registration...");
+          await registerServiceWorker();
+        }, 1000);
+      } else {
+        console.log("Service worker is active and ready");
+      }
     }
 
     // Check for any active session on initialization
@@ -75,6 +88,26 @@ export class DataTransferService {
 
     // Set up beforeunload event to warn user if transfer is in progress
     window.addEventListener("beforeunload", this.handleBeforeUnload);
+
+    // Add a periodic check for service worker health
+    if (isServiceWorkerSupported) {
+      setInterval(async () => {
+        const isActive = await isServiceWorkerActive();
+        console.log(
+          `Service worker health check: ${isActive ? "active" : "inactive"}`
+        );
+
+        // If we have a session but the service worker is gone, we need to handle that
+        if (!isActive && this.session && this.session.status === "active") {
+          console.warn(
+            "Service worker is inactive but transfer is active - attempting to recover"
+          );
+
+          // Try to re-register the service worker
+          await registerServiceWorker();
+        }
+      }, 30000); // Check every 30 seconds
+    }
   }
 
   // Set up service worker event handling
@@ -133,10 +166,29 @@ export class DataTransferService {
     chunkSize = DEFAULT_CHUNK_SIZE
   ): Promise<TransferSession> {
     try {
-      // Check if service worker is available
-      const swActive = await isServiceWorkerActive();
-      if (!swActive && isServiceWorkerSupported) {
-        await registerServiceWorker();
+      // Try to register service worker, but don't make it critical
+      if (isServiceWorkerSupported) {
+        try {
+          console.log("Checking for active service worker...");
+          const registration = await navigator.serviceWorker.getRegistration();
+
+          if (!registration || !registration.active) {
+            console.log("No active service worker found, registering now...");
+            await registerServiceWorker();
+          } else {
+            console.log("Service worker is already registered and active");
+          }
+        } catch (swError) {
+          // Log but continue even if service worker fails
+          console.warn(
+            "Service worker setup failed, will use direct API calls:",
+            swError
+          );
+        }
+      } else {
+        console.warn(
+          "Service workers not supported in this browser, will use direct API calls"
+        );
       }
 
       // Check for existing active session
@@ -156,7 +208,7 @@ export class DataTransferService {
         chunkSize,
       });
 
-      // Set up event handling
+      // Set up event handling for service worker messages if possible
       this.setupEventHandling();
 
       // Notify of session creation
@@ -395,7 +447,7 @@ export class DataTransferService {
     }
   }
 
-  // Process a data chunk
+  // Process a data chunk - give priority to direct method if needed
   private async processChunk(chunk: DataChunk) {
     if (this.pendingChunks.has(chunk.id) || !this.session) {
       return;
@@ -406,12 +458,35 @@ export class DataTransferService {
     await db.updateChunkStatus(chunk.id, "processing");
 
     try {
-      // Send to service worker for processing
-      await sendChunkToServiceWorker(
-        chunk.id,
-        chunk.items,
-        this.session.targetUrl
-      );
+      // Check if service worker is available
+      const swActive = await isServiceWorkerActive();
+
+      if (!swActive) {
+        // If service worker is not available, use direct method without retrying SW registration
+        console.log(
+          "Service worker not available - using direct processing for chunk",
+          chunk.id
+        );
+        await this.processChunkDirectly(chunk);
+        return;
+      }
+
+      // If service worker is active, use it for processing
+      console.log("Using service worker to process chunk", chunk.id);
+      try {
+        await sendChunkToServiceWorker(
+          chunk.id,
+          chunk.items,
+          this.session.targetUrl
+        );
+      } catch (swError) {
+        // If service worker method fails, fall back to direct method
+        console.warn(
+          "Service worker processing failed, using direct method as fallback:",
+          swError
+        );
+        await this.processChunkDirectly(chunk);
+      }
     } catch (error) {
       console.error("Error processing chunk:", error);
       await this.handleChunkError(
@@ -713,6 +788,49 @@ export class DataTransferService {
     if (this.messageListenerCleanup) {
       this.messageListenerCleanup();
       this.messageListenerCleanup = null;
+    }
+  }
+
+  // Add this method to the DataTransferService class
+  // This is a fallback method to process chunks directly without using the service worker
+  private async processChunkDirectly(chunk: DataChunk): Promise<void> {
+    if (!this.session) return;
+
+    console.log(
+      `Processing chunk ${chunk.id} directly (service worker fallback)`
+    );
+
+    try {
+      // Make the fetch request directly
+      const response = await fetch(this.session.targetUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(chunk.items),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(
+          `HTTP error ${response.status}: ${response.statusText}. ${errorText}`
+        );
+      }
+
+      const result = await response.json();
+      console.log(
+        `Direct chunk processing successful for ${chunk.id}:`,
+        result
+      );
+
+      // Handle the success result similarly to the service worker flow
+      await this.handleChunkResult(chunk.id, true, result);
+    } catch (error) {
+      console.error(`Direct chunk processing failed for ${chunk.id}:`, error);
+      await this.handleChunkError(
+        chunk.id,
+        error instanceof Error ? error : new Error(String(error))
+      );
     }
   }
 }

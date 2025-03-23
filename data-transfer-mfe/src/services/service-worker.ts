@@ -12,19 +12,65 @@ export async function registerServiceWorker(): Promise<ServiceWorkerRegistration
   }
 
   try {
-    // Create a blob from the service worker code
-    const blob = new Blob([serviceWorkerCode], { type: "text/javascript" });
-    const blobURL = URL.createObjectURL(blob);
+    // Try using the standard service worker file - should be at root
+    let registration: ServiceWorkerRegistration;
 
-    // Register the service worker using the blob URL
-    const registration = await navigator.serviceWorker.register(blobURL, {
-      scope: "/",
-    });
+    try {
+      // Using the standard method to register service worker
+      registration = await navigator.serviceWorker.register(
+        "/service-worker.js",
+        {
+          scope: "/",
+        }
+      );
+      console.log("Service Worker registered successfully using file path");
+    } catch (fileError) {
+      console.warn(
+        "Failed to register service worker using file path:",
+        fileError
+      );
 
-    console.log("Service Worker registered successfully:", registration);
+      // Fallback to blob URL method if file doesn't exist
+      console.log("Trying to register service worker using Blob URL...");
+      const blob = new Blob([serviceWorkerCode], {
+        type: "application/javascript",
+      });
+      const blobURL = URL.createObjectURL(blob);
 
-    // Clean up the blob URL after registration
-    URL.revokeObjectURL(blobURL);
+      registration = await navigator.serviceWorker.register(blobURL);
+      console.log("Service Worker registered successfully using Blob URL");
+
+      // Clean up the blob URL after registration
+      URL.revokeObjectURL(blobURL);
+    }
+
+    // Wait for the service worker to activate
+    if (registration.installing) {
+      console.log("Service worker installing...");
+
+      // Wait for the service worker to become active
+      await new Promise<void>((resolve) => {
+        const stateChangeListener = (e: Event) => {
+          if ((e.target as ServiceWorker).state === "activated") {
+            console.log("Service worker activated");
+            registration.installing?.removeEventListener(
+              "statechange",
+              stateChangeListener
+            );
+            resolve();
+          }
+        };
+        if (registration.installing) {
+          registration.installing.addEventListener(
+            "statechange",
+            stateChangeListener
+          );
+        } else {
+          // If there's no installing service worker, it's likely already activated
+          resolve();
+        }
+      });
+    }
 
     return registration;
   } catch (error) {
@@ -33,18 +79,26 @@ export async function registerServiceWorker(): Promise<ServiceWorkerRegistration
   }
 }
 
-// Check if the service worker is active
+// Check if the service worker is active - making this more reliable
 export async function isServiceWorkerActive(): Promise<boolean> {
   if (!isServiceWorkerSupported) return false;
 
   try {
     const registration = await navigator.serviceWorker.getRegistration();
-    return (
-      !!registration &&
-      (!!registration.active ||
-        !!registration.installing ||
-        !!registration.waiting)
-    );
+
+    // Check if we have an active service worker
+    if (registration?.active) {
+      // Try to ping the service worker to verify it's responsive
+      try {
+        const pingResult = await pingServiceWorker();
+        return pingResult !== null;
+      } catch (err) {
+        console.log("Ping to service worker failed:", err);
+        return false;
+      }
+    }
+
+    return false;
   } catch (error) {
     console.error("Error checking service worker status:", error);
     return false;
