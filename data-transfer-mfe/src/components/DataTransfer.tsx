@@ -1,7 +1,10 @@
 import React, { useEffect, useState, useCallback } from "react";
 import { dataTransferService, TransferEvents } from "../services/data-transfer";
 import { TransferSession } from "../services/db";
-import { isServiceWorkerSupported } from "../services/service-worker";
+import {
+  isServiceWorkerSupported,
+  isServiceWorkerActive,
+} from "../services/service-worker";
 
 // Constants
 const SOURCE_URL = "http://localhost:3000/specification";
@@ -41,6 +44,8 @@ const DataTransfer: React.FC<DataTransferProps> = ({ onUnmount }) => {
   const [successfulChunks, setSuccessfulChunks] = useState(0);
   const [failedChunks, setFailedChunks] = useState(0);
   const [isBrowserSupported, setIsBrowserSupported] = useState(true);
+  const [swActive, setSwActive] = useState<boolean | null>(null);
+  const [isTransferRoute, setIsTransferRoute] = useState(false);
 
   // Check if the browser is supported
   useEffect(() => {
@@ -52,6 +57,38 @@ const DataTransfer: React.FC<DataTransferProps> = ({ onUnmount }) => {
       setError(
         "Your browser does not support required features (Service Workers and IndexedDB)."
       );
+    }
+  }, []);
+
+  // Check if we're on the transfer route
+  useEffect(() => {
+    const url = window.location.href;
+    const isTransferPage = url.includes("localhost:2000/transfer");
+    setIsTransferRoute(isTransferPage);
+
+    // If we're on the transfer route, check service worker status periodically
+    if (isTransferPage) {
+      const checkServiceWorker = async () => {
+        try {
+          const active = await isServiceWorkerActive();
+          setSwActive(active);
+
+          // If it's active and we want to use it, store in localStorage
+          if (active) {
+            localStorage.setItem("useServiceWorker", "true");
+          }
+        } catch (err) {
+          console.error("Error checking service worker:", err);
+          setSwActive(false);
+        }
+      };
+
+      // Check immediately
+      checkServiceWorker();
+
+      // Then check periodically
+      const interval = setInterval(checkServiceWorker, 5000);
+      return () => clearInterval(interval);
     }
   }, []);
 
@@ -323,6 +360,25 @@ const DataTransfer: React.FC<DataTransferProps> = ({ onUnmount }) => {
   return (
     <div className="data-transfer-container">
       <h2>Data Transfer</h2>
+
+      {/* Service Worker Status Indicator (only on transfer route) */}
+      {isTransferRoute && (
+        <div
+          className="sw-status"
+          style={{
+            padding: "8px",
+            margin: "10px 0",
+            backgroundColor: swActive ? "#d4edda" : "#f8d7da",
+            color: swActive ? "#155724" : "#721c24",
+            borderRadius: "4px",
+          }}
+        >
+          <strong>Service Worker:</strong>{" "}
+          {swActive
+            ? "Active (will be used)"
+            : "Inactive (using direct method)"}
+        </div>
+      )}
 
       {error && (
         <div className="error-message">

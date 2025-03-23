@@ -5,8 +5,10 @@
   "type": "module",
   "scripts": {
     "build": "rsbuild build",
+    "postbuild": "cp public/service-worker.js dist/",
     "check": "biome check --write",
     "dev": "rsbuild dev --open",
+    "predev": "mkdir -p .rsbuild && cp public/service-worker.js .rsbuild/",
     "format": "biome format --write",
     "preview": "rsbuild preview"
   },
@@ -24,6 +26,7 @@
     "@rsbuild/plugin-react": "^1.1.1",
     "@types/react": "^18.0.10",
     "@types/react-dom": "^18.0.4",
-    "typescript": "^5.8.2"
+    "typescript": "^5.8.2",
+    "worker-rspack-loader": "^3.1.2"
   }
 }

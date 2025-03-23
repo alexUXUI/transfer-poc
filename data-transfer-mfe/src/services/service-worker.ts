@@ -4,6 +4,9 @@ import { serviceWorkerCode } from "./service-worker-code";
 // Check if service workers are supported in the browser
 export const isServiceWorkerSupported = "serviceWorker" in navigator;
 
+// The MFE origin where the service worker is hosted
+const MFE_ORIGIN = "http://localhost:2001";
+
 // Register the service worker
 export async function registerServiceWorker(): Promise<ServiceWorkerRegistration | null> {
   if (!isServiceWorkerSupported) {
@@ -12,17 +15,35 @@ export async function registerServiceWorker(): Promise<ServiceWorkerRegistration
   }
 
   try {
-    // Try using the standard service worker file - should be at root
+    // Check if we already have an active service worker
+    const existingRegistration =
+      await navigator.serviceWorker.getRegistration();
+    if (existingRegistration?.active) {
+      console.log(
+        "Found existing active service worker:",
+        existingRegistration
+      );
+      return existingRegistration;
+    }
+
+    // Determine if we're running in the MFE or as a federated module
+    const isMfeOrigin = window.location.origin.includes("2001");
+
+    // Use the appropriate origin for service worker
+    const swUrl = isMfeOrigin
+      ? "/service-worker.js"
+      : `${MFE_ORIGIN}/service-worker.js`;
+
+    console.log(`Registering service worker from: ${swUrl}`);
+
+    // Try using the standard service worker file
     let registration: ServiceWorkerRegistration;
 
     try {
       // Using the standard method to register service worker
-      registration = await navigator.serviceWorker.register(
-        "/service-worker.js",
-        {
-          scope: "/",
-        }
-      );
+      registration = await navigator.serviceWorker.register(swUrl, {
+        scope: "/",
+      });
       console.log("Service Worker registered successfully using file path");
     } catch (fileError) {
       console.warn(
@@ -37,7 +58,9 @@ export async function registerServiceWorker(): Promise<ServiceWorkerRegistration
       });
       const blobURL = URL.createObjectURL(blob);
 
-      registration = await navigator.serviceWorker.register(blobURL);
+      registration = await navigator.serviceWorker.register(blobURL, {
+        scope: "/",
+      });
       console.log("Service Worker registered successfully using Blob URL");
 
       // Clean up the blob URL after registration
@@ -190,18 +213,23 @@ export async function sendChunkToServiceWorker(
         }
       };
 
-      // Send the message with the message channel
-      registration.active.postMessage(
-        {
-          type: "TRANSFER_CHUNK",
-          data: {
-            chunkId,
-            items,
-            targetUrl,
+      // Send the message with the message channel - we know active exists from check above
+      if (registration.active) {
+        registration.active.postMessage(
+          {
+            type: "TRANSFER_CHUNK",
+            data: {
+              chunkId,
+              items,
+              targetUrl,
+            },
           },
-        },
-        [messageChannel.port2]
-      );
+          [messageChannel.port2]
+        );
+      } else {
+        // This should never happen but is needed for TypeScript
+        reject(new Error("Service worker disappeared unexpectedly"));
+      }
     });
 
     // Wait for acknowledgment or timeout

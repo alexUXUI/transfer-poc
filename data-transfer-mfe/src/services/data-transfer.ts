@@ -54,6 +54,7 @@ export class DataTransferService {
     // Register the service worker if needed and wait for it to be ready
     if (isServiceWorkerSupported) {
       console.log("Initializing service worker...");
+
       const registration = await registerServiceWorker();
 
       if (!registration || !registration.active) {
@@ -129,13 +130,43 @@ export class DataTransferService {
   private handleServiceWorkerMessage = (event: MessageEvent) => {
     const { type, data } = event.data || {};
 
+    console.log(`Received message from service worker: ${type}`, data);
+
     if (type === "TRANSFER_CHUNK_RESULT") {
+      console.log(
+        `WORKER: Received chunk result for ${data.chunkId}, success: ${data.success}`
+      );
+
       this.handleChunkResult(
         data.chunkId,
         data.success,
         data.result,
         data.error
       );
+    } else if (type === "TRANSFER_ERROR") {
+      console.error(`WORKER: Transfer error: ${data.error}`);
+
+      if (this.events.onError && this.session) {
+        this.events.onError(
+          new Error(data.error || "Unknown service worker error"),
+          this.session
+        );
+      }
+    } else if (type === "TRANSFER_PROGRESS") {
+      console.log(`WORKER: Progress update: ${data.processed}/${data.total}`);
+
+      // Forward progress updates to the UI
+      if (this.events.onProgress && data.processed !== undefined) {
+        this.events.onProgress(
+          data.processed,
+          data.total || null,
+          data.percentage || null
+        );
+      }
+    } else if (type === "PING_RESPONSE") {
+      console.log("WORKER: Service worker ping response received");
+    } else {
+      console.log(`WORKER: Unhandled message type: ${type}`);
     }
   };
 
@@ -525,53 +556,58 @@ export class DataTransferService {
     this.setProcessingCount(this.pendingChunks.size);
 
     try {
-      // IMPORTANT FIX: For most reliable behavior, prioritize direct processing
-      // Service worker is only used in very specific cases
       const url = window.location.href;
 
-      // Always use direct method by default - it's more reliable for progress updates
-      let useDirectMethod = true;
+      // Special case: Enable service worker mode for localhost:2000/transfer for testing
+      // This is specifically to test service worker on the route you requested
+      const forceServiceWorker =
+        localStorage.getItem("useServiceWorker") === "true" ||
+        url.includes("localhost:2000/transfer");
 
-      // Only attempt service worker on standalone MFE with explicit flags
-      if (!url.includes("/transfer") && !url.includes("localhost:2000")) {
-        // We're not in standalone context - check if service worker is configured
+      // Check if service worker should be used
+      let useServiceWorker = false;
+
+      if (forceServiceWorker) {
         try {
           const swActive = await isServiceWorkerActive();
+          useServiceWorker = swActive;
           if (swActive) {
-            // Consider service worker mode only if explicitly requested
-            const forceServiceWorker =
-              localStorage.getItem("useServiceWorker") === "true";
-            useDirectMethod = !forceServiceWorker;
+            console.log(
+              "Service worker is active and will be used for processing"
+            );
+          } else {
+            console.log(
+              "Service worker requested but not active, falling back to direct"
+            );
           }
         } catch (swError) {
-          console.warn(
-            "Error checking service worker, using direct method:",
-            swError
-          );
+          console.warn("Error checking service worker:", swError);
         }
       }
 
       console.log(
         `Using ${
-          useDirectMethod ? "direct" : "service worker"
+          useServiceWorker ? "SERVICE WORKER" : "direct"
         } processing for chunk ${chunk.id}`
       );
 
-      if (useDirectMethod) {
-        // Use direct method - more reliable for progress tracking
+      // If service worker is not active or not requested, use direct method
+      if (!useServiceWorker) {
         await this.processChunkDirectly(chunk);
         return;
       }
 
-      // If service worker is selected, attempt to use it
+      // Service worker approach requested and available
       try {
+        console.log(`Sending chunk ${chunk.id} to service worker`);
         await sendChunkToServiceWorker(
           chunk.id,
           chunk.items,
           this.session.targetUrl
         );
+        console.log(`Successfully sent chunk ${chunk.id} to service worker`);
       } catch (swError) {
-        // Fallback to direct method
+        // Fallback to direct method on service worker error
         console.warn("Service worker error, using direct method:", swError);
         await this.processChunkDirectly(chunk);
       }
