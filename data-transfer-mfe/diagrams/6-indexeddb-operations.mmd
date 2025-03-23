@@ -1,0 +1,38 @@
+sequenceDiagram
+    participant DB as DataTransferDatabase
+    participant IDBFactory as window.indexedDB
+    participant IDBDatabase as Database Connection
+    participant TransferSessionsStore as transferSessions ObjectStore
+    participant DataChunksStore as dataChunks ObjectStore
+    
+    Note over DB: Database Initialization
+    DB->>IDBFactory: open("data-transfer-db", 1)
+    IDBFactory-->>DB: request
+    
+    Note over DB: On upgrade needed
+    DB->>IDBDatabase: createObjectStore("dataChunks", {keyPath: "id"})
+    DB->>IDBDatabase: createIndex("by-status", "status")
+    DB->>IDBDatabase: createObjectStore("transferSessions", {keyPath: "id"})
+    
+    Note over DB: Creating a session
+    DB->>IDBDatabase: transaction("transferSessions", "readwrite")
+    DB->>TransferSessionsStore: put(session)
+    TransferSessionsStore-->>DB: sessionId
+    
+    Note over DB: Adding a chunk
+    DB->>IDBDatabase: transaction("dataChunks", "readwrite")
+    DB->>DataChunksStore: put(chunk)
+    DataChunksStore-->>DB: chunkId
+    
+    Note over DB: Getting pending chunks
+    DB->>IDBDatabase: transaction("dataChunks")
+    DB->>DataChunksStore: index("by-status")
+    DB->>DataChunksStore: getAll("pending")
+    DataChunksStore-->>DB: pendingChunks
+    
+    Note over DB: Update session status
+    DB->>IDBDatabase: transaction("transferSessions", "readwrite")
+    DB->>TransferSessionsStore: get(sessionId)
+    TransferSessionsStore-->>DB: session
+    DB->>TransferSessionsStore: put(updatedSession)
+    TransferSessionsStore-->>DB: success 

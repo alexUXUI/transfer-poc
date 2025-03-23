@@ -1,0 +1,30 @@
+classDiagram
+    class DataTransferService {
+        -session: TransferSession | null
+        -pauseRequested: boolean
+        -pendingChunks: Set<string>
+        -chunkProcessors: number
+        -isProcessingPaused: boolean
+        -events: TransferEvents
+        +startTransfer(sourceUrl, targetUrl, chunkSize)
+        +pauseTransfer()
+        +resumeTransfer()
+        +cancelTransfer()
+        -checkAndProcessPendingChunks()
+        -processChunk(chunk)
+        -handleChunkResult(chunkId, success, result, error)
+        -checkIfTransferComplete(session)
+    }
+    
+    class TransferEvents {
+        +onSessionCreated?(session)
+        +onStatusChange?(status, session)
+        +onProgress?(processed, total, percentage)
+        +onChunkProcessed?(chunkId, success, items)
+        +onComplete?(session)
+        +onError?(error, session?)
+        +onPaused?(session)
+        +onResumed?(session)
+    }
+    
+    DataTransferService --> TransferEvents : emits events to 

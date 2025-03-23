@@ -1,0 +1,26 @@
+classDiagram
+    class TransferSession {
+        id: string
+        sourceUrl: string
+        targetUrl: string
+        status: "initializing" | "active" | "paused" | "completed" | "failed"
+        totalItems: number | null
+        processedItems: number
+        chunkSize: number
+        createdAt: number
+        updatedAt: number
+        error?: string
+        lastChunkId?: string
+    }
+    
+    class DataChunk {
+        id: string
+        sessionId: string
+        items: any[]
+        status: "pending" | "processing" | "completed" | "failed"
+        createdAt: number
+        processedAt?: number
+        error?: string
+    }
+    
+    TransferSession "1" -- "many" DataChunk : contains 

@@ -1,0 +1,30 @@
+flowchart TD
+    A[Start Transfer] --> B[Create Session]
+    B --> C[Resume Processing]
+    C --> D[Enqueue Initial Fetch]
+    
+    D --> E{Download Queue Empty?}
+    E -->|No| F[Fetch Next Chunk]
+    E -->|Yes| G[Wait for Event]
+    
+    F --> H[Create Chunk in DB]
+    H --> I[Trigger Check for Pending Chunks]
+    
+    I --> J{Processors < MAX_CONCURRENT?}
+    J -->|Yes| K[Start Processing Chunk]
+    J -->|No| L[Wait for Processor to Free]
+    
+    K --> M[Fetch to Target Server]
+    M --> N[Update Chunk Status]
+    N --> O[Update Processed Count]
+    O --> P[Check If Complete]
+    P --> Q{All Items Processed?}
+    Q -->|Yes| R[Complete Transfer]
+    Q -->|No| S[Check for More Work]
+    
+    S --> T{More Chunks Needed?}
+    T -->|Yes| D
+    T -->|No| G
+    
+    G --> I
+    L --> I 
