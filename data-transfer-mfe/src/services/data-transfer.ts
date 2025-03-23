@@ -447,7 +447,7 @@ export class DataTransferService {
     }
   }
 
-  // Process a data chunk - give priority to direct method if needed
+  // Process a data chunk
   private async processChunk(chunk: DataChunk) {
     if (this.pendingChunks.has(chunk.id) || !this.session) {
       return;
@@ -457,22 +457,22 @@ export class DataTransferService {
     this.pendingChunks.add(chunk.id);
     await db.updateChunkStatus(chunk.id, "processing");
 
+    // Always increment processing count to keep UI updated
+    this.setProcessingCount(this.pendingChunks.size);
+
     try {
       // Check if service worker is available
       const swActive = await isServiceWorkerActive();
 
       if (!swActive) {
-        // If service worker is not available, use direct method without retrying SW registration
-        console.log(
-          "Service worker not available - using direct processing for chunk",
-          chunk.id
-        );
+        // Use direct method without retrying SW registration
+        console.log(`Using direct processing for chunk ${chunk.id}`);
         await this.processChunkDirectly(chunk);
         return;
       }
 
-      // If service worker is active, use it for processing
-      console.log("Using service worker to process chunk", chunk.id);
+      // If service worker is active, use it
+      console.log(`Using service worker to process chunk ${chunk.id}`);
       try {
         await sendChunkToServiceWorker(
           chunk.id,
@@ -480,11 +480,8 @@ export class DataTransferService {
           this.session.targetUrl
         );
       } catch (swError) {
-        // If service worker method fails, fall back to direct method
-        console.warn(
-          "Service worker processing failed, using direct method as fallback:",
-          swError
-        );
+        // Fallback to direct method
+        console.warn("Service worker error, using direct method:", swError);
         await this.processChunkDirectly(chunk);
       }
     } catch (error) {
@@ -496,6 +493,14 @@ export class DataTransferService {
     }
   }
 
+  // Helper method to update processing count (call this wherever pendingChunks size changes)
+  private setProcessingCount(count: number) {
+    if (this.events.onChunkProcessed) {
+      // This will trigger UI updates for processing chunks count
+      this.events.onChunkProcessed("processing-update", true, 0);
+    }
+  }
+
   // Handle chunk processing result
   private async handleChunkResult(
     chunkId: string,
@@ -503,67 +508,87 @@ export class DataTransferService {
     result?: any,
     error?: string
   ) {
-    if (!this.session) return;
+    console.log(`Handling chunk result for ${chunkId}: ${success}`);
+    this.pendingChunks.delete(chunkId);
+
+    const currentSession = this.session;
+    if (!currentSession) {
+      return console.warn("No active session to handle chunk result");
+    }
 
     try {
+      // Get chunk to determine number of items
       const chunk = await db.getChunk(chunkId);
       if (!chunk) {
-        console.warn(`Chunk ${chunkId} not found when handling result`);
-        return;
+        return console.warn(`Chunk ${chunkId} not found`);
       }
 
+      // Update chunk status in database
+      await db.updateChunkStatus(
+        chunkId,
+        success ? "completed" : "failed",
+        error
+      );
+
+      // If successful, update processed count in the session
       if (success) {
-        // Update chunk and session for success
-        await db.updateChunkStatus(chunkId, "completed");
+        const itemsCount = chunk.items.length;
+        if (itemsCount > 0) {
+          const updatedProcessedItems =
+            currentSession.processedItems + itemsCount;
 
-        const itemCount = chunk.items.length;
-        const newProcessedCount = this.session.processedItems + itemCount;
+          // Update session in database
+          const updatedSession = await db.updateSession(currentSession.id, {
+            processedItems: updatedProcessedItems,
+          });
 
-        this.session = await db.updateSession(this.session.id, {
-          processedItems: newProcessedCount,
-          lastChunkId: chunkId,
-        });
+          this.session = updatedSession;
 
-        // Notify progress
-        if (this.events.onProgress) {
-          const percentage = this.session.totalItems
-            ? Math.round((newProcessedCount / this.session.totalItems) * 100)
-            : null;
-          this.events.onProgress(
-            newProcessedCount,
-            this.session.totalItems,
-            percentage
-          );
-        }
+          // Force UI to update with new count
+          this.forceProgressUpdate(updatedProcessedItems);
 
-        // Notify chunk processed
-        if (this.events.onChunkProcessed) {
-          this.events.onChunkProcessed(chunkId, true, itemCount);
-        }
-
-        // Reset retry count on success
-        this.retryCount = 0;
-
-        // Check if we need to fetch more data
-        if (
-          !this.pauseRequested &&
-          this.session.status === "active" &&
-          this.downloadQueue.length === 0 &&
-          !this.activeDownload
-        ) {
-          this.enqueueFetch(newProcessedCount, this.session.chunkSize);
+          // Also notify through event callback
+          if (this.events.onChunkProcessed) {
+            this.events.onChunkProcessed(chunkId, true, itemsCount);
+          }
         }
       } else {
-        // Handle chunk error
-        await this.handleChunkError(
-          chunkId,
-          new Error(error || "Unknown error processing chunk")
+        // Handle failed chunk
+        console.error(`Chunk ${chunkId} failed:`, error);
+        if (this.events.onChunkProcessed) {
+          this.events.onChunkProcessed(chunkId, false, 0);
+        }
+      }
+
+      // Check if all items have been processed
+      if (currentSession.totalItems !== null) {
+        const sessionFromDb = await db.getSession(currentSession.id);
+        const totalProcessed = sessionFromDb?.processedItems || 0;
+        const isComplete = totalProcessed >= currentSession.totalItems;
+
+        if (isComplete) {
+          console.log("All items processed, marking transfer as complete");
+          try {
+            const completedSession = await this.updateSessionStatus(
+              "completed"
+            );
+            this.stopPolling();
+            if (this.events.onComplete) {
+              this.events.onComplete(completedSession);
+            }
+          } catch (error) {
+            console.error("Error completing transfer:", error);
+          }
+        }
+      }
+    } catch (err) {
+      console.error(`Error handling chunk result for ${chunkId}:`, err);
+      if (this.events.onError) {
+        this.events.onError(
+          err instanceof Error ? err : new Error(String(err)),
+          this.session
         );
       }
-    } catch (error) {
-      console.error("Error handling chunk result:", error);
-    } finally {
-      this.pendingChunks.delete(chunkId);
     }
   }
 
@@ -686,6 +711,11 @@ export class DataTransferService {
       }
 
       const result = await response.json();
+      console.log(
+        `Fetched data: ${result.data?.length || 0} items, total: ${
+          result.total
+        }`
+      );
 
       // Cancel if paused during fetch
       if (this.pauseRequested) {
@@ -694,6 +724,7 @@ export class DataTransferService {
 
       // Update total count if we get it from response
       if (result.total != null && this.session.totalItems === null) {
+        console.log(`Setting total items to ${result.total}`);
         this.session = await db.updateSession(this.session.id, {
           totalItems: result.total,
         });
@@ -704,19 +735,55 @@ export class DataTransferService {
 
       // If no items returned, we're done
       if (items.length === 0) {
+        console.log("No items returned, marking transfer as completed");
         await this.updateSessionStatus("completed");
         return;
       }
 
       // Create a chunk and store it
-      await db.addChunk(this.session.id, items);
+      const chunk = await db.addChunk(this.session.id, items);
+      console.log(`Created chunk ${chunk.id} with ${items.length} items`);
+
+      // Check and update the processedItems count if needed
+      if (this.session && this.events.onProgress) {
+        const currentSession = await db.getSession(this.session.id);
+        if (currentSession) {
+          // Update UI with current processed count to keep it fresh
+          this.forceProgressUpdate(currentSession.processedItems || 0);
+        }
+      }
 
       // Queue the next fetch if needed
-      if (items.length === top) {
+      if (items.length >= top) {
+        // Use >= to handle edge cases
+        console.log(`Queueing next fetch from skip=${skip + top}`);
         this.enqueueFetch(skip + top, top);
       } else {
-        // If we got fewer items than requested, we're at the end
-        console.log("Reached end of data, completing soon");
+        // If we got fewer items than requested, check if we've got all data
+        console.log(
+          `Got ${items.length} items, which is less than the requested ${top}`
+        );
+
+        // Get latest session data
+        const latestSession = await db.getSession(this.session.id);
+        if (latestSession && latestSession.totalItems !== null) {
+          const expectedTotal = latestSession.totalItems;
+          const fetchedSoFar = skip + items.length;
+
+          if (fetchedSoFar < expectedTotal) {
+            // We haven't fetched all items yet, continue
+            console.log(
+              `Fetched ${fetchedSoFar} of ${expectedTotal} items, continuing...`
+            );
+            this.enqueueFetch(skip + items.length, top);
+          } else {
+            console.log(
+              `Reached end of data (${fetchedSoFar} of ${expectedTotal}), completing soon`
+            );
+          }
+        } else {
+          console.log("Reached end of data, completing soon");
+        }
       }
     } catch (error: unknown) {
       // Type error as unknown
@@ -791,46 +858,157 @@ export class DataTransferService {
     }
   }
 
-  // Add this method to the DataTransferService class
-  // This is a fallback method to process chunks directly without using the service worker
+  // This is a direct processing method that bypasses the service worker
   private async processChunkDirectly(chunk: DataChunk): Promise<void> {
     if (!this.session) return;
 
+    // Log the operation
     console.log(
-      `Processing chunk ${chunk.id} directly (service worker fallback)`
+      `DIRECT: Processing chunk ${chunk.id} with ${chunk.items.length} items`
     );
 
     try {
-      // Make the fetch request directly
+      // 1. Make the direct API call to the target server
       const response = await fetch(this.session.targetUrl, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(chunk.items),
+        cache: "no-store", // Prevent caching
       });
 
+      // 2. Check if the API call was successful
       if (!response.ok) {
-        const errorText = await response.text();
         throw new Error(
-          `HTTP error ${response.status}: ${response.statusText}. ${errorText}`
+          `HTTP error ${response.status}: ${response.statusText}`
         );
       }
 
+      // 3. Parse the response
       const result = await response.json();
-      console.log(
-        `Direct chunk processing successful for ${chunk.id}:`,
-        result
-      );
+      console.log(`DIRECT: Success for chunk ${chunk.id}`, result);
 
-      // Handle the success result similarly to the service worker flow
-      await this.handleChunkResult(chunk.id, true, result);
+      // 4. Mark the chunk as completed
+      await db.updateChunkStatus(chunk.id, "completed");
+
+      // 5. Get the current processed count
+      const itemCount = chunk.items.length;
+
+      // 6. Update the session's processed count
+      const updatedSession = await db.updateSession(this.session.id, {
+        processedItems: (this.session.processedItems || 0) + itemCount,
+        lastChunkId: chunk.id,
+      });
+
+      // 7. Update our local reference
+      this.session = updatedSession;
+
+      // 8. Notify the UI of the updated progress
+      const processedCount = updatedSession.processedItems;
+      console.log(`DIRECT: Updated progress to ${processedCount} items`);
+
+      if (this.events.onProgress) {
+        const percentage = updatedSession.totalItems
+          ? Math.round((processedCount / updatedSession.totalItems) * 100)
+          : null;
+
+        this.events.onProgress(
+          processedCount,
+          updatedSession.totalItems,
+          percentage
+        );
+      }
+
+      // 9. Notify that the chunk processing was successful
+      if (this.events.onChunkProcessed) {
+        this.events.onChunkProcessed(chunk.id, true, itemCount);
+      }
+
+      // 10. Remove from pending chunks
+      this.pendingChunks.delete(chunk.id);
+
+      // 11. Reset retry count
+      this.retryCount = 0;
+
+      // 12. Check if we've completed all items
+      if (
+        updatedSession.totalItems &&
+        processedCount >= updatedSession.totalItems
+      ) {
+        console.log(
+          `DIRECT: All ${updatedSession.totalItems} items processed, completing transfer`
+        );
+        await this.updateSessionStatus("completed");
+      }
     } catch (error) {
-      console.error(`Direct chunk processing failed for ${chunk.id}:`, error);
-      await this.handleChunkError(
-        chunk.id,
-        error instanceof Error ? error : new Error(String(error))
-      );
+      console.error(`DIRECT: Error processing chunk ${chunk.id}:`, error);
+
+      // Handle retry logic
+      this.retryCount++;
+      if (this.retryCount < MAX_RETRIES) {
+        console.log(
+          `DIRECT: Will retry chunk ${chunk.id} (attempt ${this.retryCount})`
+        );
+        setTimeout(async () => {
+          await db.updateChunkStatus(chunk.id, "pending");
+          this.pendingChunks.delete(chunk.id);
+        }, RETRY_DELAY);
+      } else {
+        await this.handleChunkError(
+          chunk.id,
+          error instanceof Error ? error : new Error(String(error))
+        );
+      }
+    }
+  }
+
+  // Function to update session with higher priority
+  private forceProgressUpdate(processedCount: number): void {
+    // Only update if we have a session and events listener
+    if (!this.session || !this.events.onProgress) return;
+
+    try {
+      console.log(`Forcing progress update with count: ${processedCount}`);
+
+      // Get the most recent session data for accuracy
+      if (this.session.id) {
+        db.getSession(this.session.id)
+          .then((updatedSession: TransferSession | undefined) => {
+            if (updatedSession) {
+              this.session = updatedSession;
+
+              // Use the most current data for calculations
+              const percentage = updatedSession.totalItems
+                ? Math.round(
+                    (updatedSession.processedItems /
+                      updatedSession.totalItems) *
+                      100
+                  )
+                : null;
+
+              // This will force the UI to update immediately with accurate data
+              if (this.events.onProgress) {
+                this.events.onProgress(
+                  updatedSession.processedItems,
+                  updatedSession.totalItems,
+                  percentage
+                );
+              }
+
+              // Also trigger a status change notification to refresh UI
+              if (
+                this.events.onStatusChange &&
+                updatedSession.status === "active"
+              ) {
+                this.events.onStatusChange("active", updatedSession);
+              }
+            }
+          })
+          .catch((error: Error) => {
+            console.error("Error getting updated session data:", error);
+          });
+      }
+    } catch (error) {
+      console.error("Error forcing progress update:", error);
     }
   }
 }

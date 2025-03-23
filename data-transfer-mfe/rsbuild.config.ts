@@ -27,9 +27,9 @@ export default defineConfig({
   source: {
     // Any source configuration you need
   },
-  dev: {
-    assetPrefix: "/",
-  },
+  // dev: {
+  //   assetPrefix: "/",
+  // },
   server: {
     port: 2001,
     cors: true,
