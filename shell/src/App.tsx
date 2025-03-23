@@ -8,10 +8,7 @@ const App = () => {
       <BrowserRouter basename="/">
         <Routes>
           <Route path="/" Component={() => <div>Home</div>} />
-          <Route
-            path="/transfer"
-            Component={() => <DataTransferMfe style={{ color: "red" }} />}
-          />
+          <Route path="/transfer" Component={() => <DataTransferMfe />} />
           <Route
             path="/service"
             Component={() => <GenericServiceMfe style={{ color: "blue" }} />}

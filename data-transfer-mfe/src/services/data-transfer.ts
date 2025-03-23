@@ -610,12 +610,20 @@ export class DataTransferService {
 
           this.session = updatedSession;
 
-          // Force UI to update with new count
-          this.forceProgressUpdate(updatedProcessedItems);
+          // DO NOT call onChunkProcessed here to avoid duplicate counting
+          // Simply update chunks count in the UI via progress update
+          if (this.events.onProgress) {
+            const percentage = updatedSession.totalItems
+              ? Math.round(
+                  (updatedProcessedItems / updatedSession.totalItems) * 100
+                )
+              : null;
 
-          // Also notify through event callback
-          if (this.events.onChunkProcessed) {
-            this.events.onChunkProcessed(chunkId, true, itemsCount);
+            this.events.onProgress(
+              updatedProcessedItems,
+              updatedSession.totalItems,
+              percentage
+            );
           }
 
           // Check if we've completed all chunks
@@ -1036,7 +1044,7 @@ export class DataTransferService {
       // 8. Update our local reference
       this.session = updatedSession;
 
-      // 9. Notify the UI of the updated progress
+      // 9. Notify the UI of the updated progress - but DO NOT notify chunk processing
       const processedCount = updatedSession.processedItems;
       console.log(`DIRECT: Updated progress to ${processedCount} items`);
 
@@ -1052,18 +1060,13 @@ export class DataTransferService {
         );
       }
 
-      // 10. Notify that the chunk processing was successful
-      if (this.events.onChunkProcessed) {
-        this.events.onChunkProcessed(chunk.id, true, itemCount);
-      }
-
-      // 11. Remove from pending chunks
+      // 10. Remove from pending chunks
       this.pendingChunks.delete(chunk.id);
 
-      // 12. Reset retry count
+      // 11. Reset retry count
       this.retryCount = 0;
 
-      // 13. Check if we've completed all items
+      // 12. Check if we've completed all items
       if (
         updatedSession.totalItems !== null &&
         processedCount >= updatedSession.totalItems
