@@ -321,6 +321,21 @@ const DataTransfer: React.FC<DataTransferProps> = ({ onUnmount }) => {
     <div className="data-transfer-container">
       <h2>Data Transfer</h2>
 
+      <div
+        className="debug-banner"
+        style={{
+          backgroundColor: "#fff3cd",
+          border: "1px solid #ffeeba",
+          color: "#856404",
+          padding: "10px",
+          borderRadius: "4px",
+          marginBottom: "15px",
+          fontWeight: "bold",
+        }}
+      >
+        TESTING MODE: Synthetic delays enabled (3s fetch + 10s processing)
+      </div>
+
       {error && (
         <div className="error-message">
           <h3>Error</h3>

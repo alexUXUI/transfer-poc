@@ -112,6 +112,13 @@ export class DataTransferService {
         this.events.onSessionCreated(this.session);
       }
 
+      console.log("====== SYNTHETIC DELAY INFORMATION ======");
+      console.log("This version includes synthetic delays for testing:");
+      console.log("- 3-second delay before each fetch operation");
+      console.log("- 10-second delay before each chunk processing");
+      console.log("This allows testing of pause/resume functionality");
+      console.log("=========================================");
+
       // Start the transfer process
       await this.updateSessionStatus("active");
       this.startPolling();
@@ -136,22 +143,33 @@ export class DataTransferService {
       return null;
     }
 
+    console.log("Pause requested! Setting pauseRequested flag...");
     this.pauseRequested = true;
 
     // Cancel any active download
     if (this.activeDownload) {
+      console.log("Aborting active download");
       this.activeDownload.abort();
       this.activeDownload = null;
     }
 
     // Clear download queue
-    this.downloadQueue = [];
+    if (this.downloadQueue.length > 0) {
+      console.log(
+        `Clearing download queue with ${this.downloadQueue.length} pending items`
+      );
+      this.downloadQueue = [];
+    }
 
     // Wait for pending chunks to complete
     if (this.pendingChunks.size > 0) {
       console.log(
-        `Waiting for ${this.pendingChunks.size} pending chunks to complete before pausing...`
+        `Waiting for ${this.pendingChunks.size} pending chunks to complete before pausing. ` +
+          `Note: With the synthetic delay, this may take up to 10 seconds per chunk.`
       );
+
+      // We could wait for chunks to complete, but with our synthetic delay
+      // it's better to just set the flag and let the long-running operations check it
     }
 
     try {
@@ -182,7 +200,9 @@ export class DataTransferService {
     }
 
     try {
+      console.log("Resume requested! Clearing pauseRequested flag...");
       this.pauseRequested = false;
+
       await this.updateSessionStatus("active");
       this.startPolling();
 
@@ -191,10 +211,18 @@ export class DataTransferService {
         const lastChunk = await db.getChunk(this.session.lastChunkId);
         if (lastChunk) {
           const nextSkip = this.session.processedItems;
+          console.log(`Resuming transfer from position ${nextSkip}`);
+          console.log(
+            "Note: With synthetic delays, you'll see a 3-second delay before fetch and 10-second delay during processing"
+          );
           this.enqueueFetch(nextSkip, this.session.chunkSize);
         }
       } else {
         // Start from the beginning if we don't have a last chunk
+        console.log("No last chunk found, starting from the beginning");
+        console.log(
+          "Note: With synthetic delays, you'll see a 3-second delay before fetch and 10-second delay during processing"
+        );
         this.enqueueFetch(0, this.session.chunkSize);
       }
 
@@ -704,6 +732,17 @@ export class DataTransferService {
         `Fetching data from ${this.session.sourceUrl} (skip=${skip}, top=${top})`
       );
 
+      // Add a short synthetic delay for fetching too (3 seconds)
+      console.log(`Adding 3 second synthetic delay before fetch operation...`);
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+
+      // Check if fetching was cancelled during the delay
+      if (this.pauseRequested || !this.activeDownload) {
+        console.log("Fetch operation cancelled during synthetic delay");
+        return;
+      }
+      console.log("Delay complete, continuing with fetch");
+
       // Fetch data from source
       const response = await fetch(
         `${this.session.sourceUrl}?skip=${skip}&top=${top}`,
@@ -859,6 +898,19 @@ export class DataTransferService {
     );
 
     try {
+      // Add synthetic delay of 10 seconds for testing pause and resume
+      console.log(`Adding 10 second synthetic delay for chunk ${chunk.id}...`);
+      await new Promise((resolve) => setTimeout(resolve, 10000));
+      console.log(`Delay complete, continuing with chunk ${chunk.id}`);
+
+      // Check if the operation was cancelled during the delay
+      if (this.pauseRequested) {
+        console.log(
+          `Chunk ${chunk.id} processing cancelled during synthetic delay`
+        );
+        return;
+      }
+
       // 1. Make the direct API call to the target server
       const response = await fetch(this.session.targetUrl, {
         method: "POST",
