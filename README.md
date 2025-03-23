@@ -16,10 +16,6 @@ The browser-based data transfer system provides a solution for transferring larg
 
 The system architecture is documented through a series of diagrams that explain different aspects of the implementation. All diagrams use [Mermaid](https://mermaid-js.github.io/) syntax, which can be rendered in GitHub, VSCode (with plugins), or using the Mermaid Live Editor (https://mermaid.live/).
 
-### Inline Diagram Example
-
-You can view the diagrams inline by using the Mermaid code fence syntax. Here's the System Architecture diagram:
-
 ```mermaid
 sequenceDiagram
     participant Browser as Web Browser
