@@ -124,6 +124,11 @@ const DataTransfer: React.FC<DataTransferProps> = ({ onUnmount }) => {
               )
             );
           }
+
+          // The service will handle auto-resuming, but make sure the UI reflects the current state
+          if (existingSession.status === "active") {
+            showNotification("Transfer is in progress", "info");
+          }
         }
       } catch (error) {
         console.error("Error checking session:", error);
@@ -193,7 +198,7 @@ const DataTransfer: React.FC<DataTransferProps> = ({ onUnmount }) => {
         stuckCounter++;
         if (stuckCounter > 20) {
           // About 5 seconds with no activity
-          console.log("Processing appears stuck, refreshing component state");
+          console.log("Flushing chunks...");
           // Refresh session data directly from database
           dataTransferService.getCurrentSession().then((currentSession) => {
             if (currentSession) {

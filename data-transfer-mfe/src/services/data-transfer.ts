@@ -52,8 +52,45 @@ export class DataTransferService {
         console.log("Restored active session:", activeSession);
 
         // Set up event handling if session is active
-        if (activeSession.status === "active") {
+        if (
+          activeSession.status === "active" ||
+          activeSession.status === "paused"
+        ) {
+          // If the session is paused, we should set it back to active since
+          // the user is returning to the site and we want to auto-resume
+          if (activeSession.status === "paused") {
+            console.log(
+              "Auto-resuming previously paused session after page return"
+            );
+            // Update session status to active
+            this.session = await db.updateSession(activeSession.id, {
+              status: "active",
+            });
+
+            // Notify status change
+            if (this.events.onStatusChange) {
+              this.events.onStatusChange("active", this.session);
+            }
+          }
+
+          // Resume the processing
+          this.pauseRequested = false;
           this.resumeProcessing();
+
+          // Resume fetching from where we left off
+          if (activeSession.processedItems > 0 || activeSession.lastChunkId) {
+            console.log(
+              `Auto-resuming transfer from position ${activeSession.processedItems}`
+            );
+            this.enqueueFetch(
+              activeSession.processedItems,
+              activeSession.chunkSize
+            );
+          } else {
+            // If we don't have a processed count, start from beginning
+            console.log("No progress data found, starting from beginning");
+            this.enqueueFetch(0, activeSession.chunkSize);
+          }
         }
       }
     } catch (error) {
@@ -289,6 +326,7 @@ export class DataTransferService {
   private resumeProcessing(): void {
     if (this.isProcessingPaused) {
       this.isProcessingPaused = false;
+      this.pauseRequested = false;
       console.log("Event processing resumed");
 
       // Trigger an immediate check for pending chunks
@@ -509,11 +547,14 @@ export class DataTransferService {
         this.downloadQueue.length === 0 &&
         !this.activeDownload &&
         this.pendingChunks.size === 0 &&
-        this.chunkProcessors === 0
+        this.chunkProcessors === 0 &&
+        session.status === "active" // Only auto-resume if the session is still active
       ) {
         // We're still missing items but no activity is happening
         console.log(
-          `Still missing ${totalItems - processedItems} items but no activity`
+          `Still missing ${
+            totalItems - processedItems
+          } items but no activity, auto-resuming download`
         );
 
         // Try to restart from where we left off
@@ -734,7 +775,7 @@ export class DataTransferService {
     }
   }
 
-  // This is the direct processing method (previously was a fallback, now it's the only method)
+  // Method to process a data chunk by sending it directly to the target URL
   private async processChunkDirectly(chunk: DataChunk): Promise<void> {
     if (!this.session) return;
 
@@ -923,6 +964,14 @@ export class DataTransferService {
     try {
       this.session = await db.updateSession(this.session.id, { status, error });
 
+      // Reset flags as appropriate when status changes
+      if (status === "active") {
+        this.pauseRequested = false;
+        this.isProcessingPaused = false;
+      } else if (status === "paused") {
+        this.isProcessingPaused = true;
+      }
+
       // Notify status change
       if (this.events.onStatusChange) {
         this.events.onStatusChange(status, this.session);
@@ -959,7 +1008,11 @@ export class DataTransferService {
 
   // Check if a transfer is in progress
   public isTransferInProgress(): boolean {
-    return !!this.session && this.session.status === "active";
+    return (
+      !!this.session &&
+      (this.session.status === "active" ||
+        this.session.status === "initializing")
+    );
   }
 }
 
