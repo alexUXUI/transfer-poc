@@ -605,6 +605,7 @@ export class DataTransferService {
           // Update session in database
           const updatedSession = await db.updateSession(currentSession.id, {
             processedItems: updatedProcessedItems,
+            lastChunkId: chunkId,
           });
 
           this.session = updatedSession;
@@ -616,34 +617,15 @@ export class DataTransferService {
           if (this.events.onChunkProcessed) {
             this.events.onChunkProcessed(chunkId, true, itemsCount);
           }
+
+          // Check if we've completed all chunks
+          await this.checkIfTransferComplete(updatedSession);
         }
       } else {
         // Handle failed chunk
         console.error(`Chunk ${chunkId} failed:`, error);
         if (this.events.onChunkProcessed) {
           this.events.onChunkProcessed(chunkId, false, 0);
-        }
-      }
-
-      // Check if all items have been processed
-      if (currentSession.totalItems !== null) {
-        const sessionFromDb = await db.getSession(currentSession.id);
-        const totalProcessed = sessionFromDb?.processedItems || 0;
-        const isComplete = totalProcessed >= currentSession.totalItems;
-
-        if (isComplete) {
-          console.log("All items processed, marking transfer as complete");
-          try {
-            const completedSession = await this.updateSessionStatus(
-              "completed"
-            );
-            this.stopPolling();
-            if (this.events.onComplete) {
-              this.events.onComplete(completedSession);
-            }
-          } catch (error) {
-            console.error("Error completing transfer:", error);
-          }
         }
       }
     } catch (err) {
@@ -654,6 +636,62 @@ export class DataTransferService {
           this.session || undefined
         );
       }
+    }
+  }
+
+  // Add a dedicated method to check if transfer is complete
+  private async checkIfTransferComplete(
+    session: TransferSession
+  ): Promise<void> {
+    // Skip if we don't know the total items
+    if (!session || session.totalItems === null) return;
+
+    try {
+      // Get latest session data
+      const freshSession = await db.getSession(session.id);
+      if (!freshSession || freshSession.totalItems === null) return;
+
+      const { processedItems, totalItems } = freshSession;
+
+      console.log(
+        `Completion check: ${processedItems}/${totalItems} items processed`
+      );
+
+      // Check if we've processed all items
+      if (processedItems >= totalItems) {
+        console.log(`All ${totalItems} items processed, completing transfer`);
+
+        // Quick check to see if there are any pending chunks
+        const pendingChunks = await db.getPendingChunks(session.id, 1);
+
+        if (pendingChunks.length === 0 && this.pendingChunks.size === 0) {
+          console.log("No pending chunks, marking transfer as complete");
+          await this.updateSessionStatus("completed");
+          this.stopPolling();
+
+          if (this.events.onComplete) {
+            this.events.onComplete(freshSession);
+          }
+        } else {
+          console.log(
+            `Found ${pendingChunks.length} pending chunks, waiting for them to complete`
+          );
+        }
+      } else if (
+        this.downloadQueue.length === 0 &&
+        !this.activeDownload &&
+        this.pendingChunks.size === 0
+      ) {
+        // We're still missing items but no activity is happening
+        console.log(
+          `Still missing ${totalItems - processedItems} items but no activity`
+        );
+
+        // Try to restart from where we left off
+        this.enqueueFetch(processedItems, session.chunkSize);
+      }
+    } catch (error) {
+      console.error("Error checking if transfer is complete:", error);
     }
   }
 
@@ -799,7 +837,7 @@ export class DataTransferService {
       }
 
       // Update total count if we get it from response
-      if (result.total != null && this.session.totalItems === null) {
+      if (result.total != null) {
         console.log(`Setting total items to ${result.total}`);
         this.session = await db.updateSession(this.session.id, {
           totalItems: result.total,
@@ -809,10 +847,31 @@ export class DataTransferService {
       // Process the items
       const items = result.data || [];
 
-      // If no items returned, we're done
+      // If no items returned, check if we're done
       if (items.length === 0) {
-        console.log("No items returned, marking transfer as completed");
-        await this.updateSessionStatus("completed");
+        console.log("No items returned, checking if transfer is complete");
+        const currentSession = await db.getSession(this.session.id);
+        if (
+          currentSession &&
+          currentSession.totalItems !== null &&
+          currentSession.processedItems >= currentSession.totalItems
+        ) {
+          console.log(
+            `All ${currentSession.totalItems} items processed. Completing transfer.`
+          );
+          await this.updateSessionStatus("completed");
+        } else {
+          console.log(
+            "No items returned but transfer not complete. This may indicate an issue."
+          );
+          // Try fetching from a different position
+          if (currentSession && currentSession.processedItems > 0) {
+            console.log(
+              `Trying to resume from position ${currentSession.processedItems}`
+            );
+            this.enqueueFetch(currentSession.processedItems, top);
+          }
+        }
         return;
       }
 
@@ -820,46 +879,41 @@ export class DataTransferService {
       const chunk = await db.addChunk(this.session.id, items);
       console.log(`Created chunk ${chunk.id} with ${items.length} items`);
 
-      // Check and update the processedItems count if needed
-      if (this.session && this.events.onProgress) {
-        const currentSession = await db.getSession(this.session.id);
-        if (currentSession) {
-          // Update UI with current processed count to keep it fresh
-          this.forceProgressUpdate(currentSession.processedItems || 0);
-        }
+      // Get current session state
+      const currentSession = await db.getSession(this.session.id);
+      if (!currentSession) return;
+
+      // Critical: Force an immediate update to UI
+      if (this.events.onProgress) {
+        this.forceProgressUpdate(currentSession.processedItems);
       }
 
-      // Queue the next fetch if needed
-      if (items.length >= top) {
-        // Use >= to handle edge cases
-        console.log(`Queueing next fetch from skip=${skip + top}`);
-        this.enqueueFetch(skip + top, top);
-      } else {
-        // If we got fewer items than requested, check if we've got all data
-        console.log(
-          `Got ${items.length} items, which is less than the requested ${top}`
-        );
+      // Calculate next position
+      const nextSkip = skip + items.length;
 
-        // Get latest session data
-        const latestSession = await db.getSession(this.session.id);
-        if (latestSession && latestSession.totalItems !== null) {
-          const expectedTotal = latestSession.totalItems;
-          const fetchedSoFar = skip + items.length;
-
-          if (fetchedSoFar < expectedTotal) {
-            // We haven't fetched all items yet, continue
-            console.log(
-              `Fetched ${fetchedSoFar} of ${expectedTotal} items, continuing...`
-            );
-            this.enqueueFetch(skip + items.length, top);
-          } else {
-            console.log(
-              `Reached end of data (${fetchedSoFar} of ${expectedTotal}), completing soon`
-            );
-          }
+      // Check if we're done or need to fetch more
+      if (currentSession.totalItems !== null) {
+        if (nextSkip >= currentSession.totalItems) {
+          console.log(
+            `Reached total items count (${nextSkip} >= ${currentSession.totalItems}), no more fetches needed`
+          );
+          // We don't mark as completed here - that will happen when all chunks are processed
         } else {
-          console.log("Reached end of data, completing soon");
+          // We have more items to fetch
+          console.log(
+            `Fetched ${nextSkip} of ${currentSession.totalItems}, continuing fetch`
+          );
+          this.enqueueFetch(nextSkip, top);
         }
+      } else if (items.length >= top) {
+        // If we don't know the total but got a full page, fetch more
+        console.log(`Got full page of ${items.length} items, fetching more`);
+        this.enqueueFetch(nextSkip, top);
+      } else {
+        // We got less than a full page and don't know the total
+        console.log(
+          `Got partial page (${items.length} < ${top}) and no total, assuming done`
+        );
       }
     } catch (error: unknown) {
       // Type error as unknown
@@ -971,15 +1025,18 @@ export class DataTransferService {
       const itemCount = chunk.items.length;
 
       // 6. Update the session's processed count
+      const newProcessedCount = (this.session.processedItems || 0) + itemCount;
+
+      // 7. Update the session with the new count
       const updatedSession = await db.updateSession(this.session.id, {
-        processedItems: (this.session.processedItems || 0) + itemCount,
+        processedItems: newProcessedCount,
         lastChunkId: chunk.id,
       });
 
-      // 7. Update our local reference
+      // 8. Update our local reference
       this.session = updatedSession;
 
-      // 8. Notify the UI of the updated progress
+      // 9. Notify the UI of the updated progress
       const processedCount = updatedSession.processedItems;
       console.log(`DIRECT: Updated progress to ${processedCount} items`);
 
@@ -995,20 +1052,20 @@ export class DataTransferService {
         );
       }
 
-      // 9. Notify that the chunk processing was successful
+      // 10. Notify that the chunk processing was successful
       if (this.events.onChunkProcessed) {
         this.events.onChunkProcessed(chunk.id, true, itemCount);
       }
 
-      // 10. Remove from pending chunks
+      // 11. Remove from pending chunks
       this.pendingChunks.delete(chunk.id);
 
-      // 11. Reset retry count
+      // 12. Reset retry count
       this.retryCount = 0;
 
-      // 12. Check if we've completed all items
+      // 13. Check if we've completed all items
       if (
-        updatedSession.totalItems &&
+        updatedSession.totalItems !== null &&
         processedCount >= updatedSession.totalItems
       ) {
         console.log(

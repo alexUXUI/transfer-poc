@@ -340,29 +340,27 @@ const DataTransfer: React.FC<DataTransferProps> = ({ onUnmount }) => {
       try {
         const currentSession = await dataTransferService.getCurrentSession();
         if (currentSession) {
-          console.log(
-            `UI Refresh: ${currentSession.processedItems}/${currentSession.totalItems} items`
-          );
-
-          // Update all component state to match the database state
+          // Update UI with very minimal processing
           setSession(currentSession);
           setProcessedItems(currentSession.processedItems);
 
           if (currentSession.totalItems !== null) {
             setTotalItems(currentSession.totalItems);
-            const calculatedPercentage = Math.round(
-              (currentSession.processedItems / currentSession.totalItems) * 100
+            setPercentage(
+              Math.round(
+                (currentSession.processedItems / currentSession.totalItems) *
+                  100
+              )
             );
-            setPercentage(calculatedPercentage);
           }
         }
       } catch (err) {
-        console.error("Error polling for updates:", err);
+        // Silent error - don't log to avoid console spam
       }
 
-      // Continue polling
+      // Continue polling at a faster rate (60ms)
       if (isMounted) {
-        setTimeout(pollForUpdates, 100); // Poll very frequently (every 100ms)
+        setTimeout(pollForUpdates, 60);
       }
     };
 
@@ -373,7 +371,7 @@ const DataTransfer: React.FC<DataTransferProps> = ({ onUnmount }) => {
     return () => {
       isMounted = false;
     };
-  }, []); // Empty dependency array so it runs once on mount
+  }, []);
 
   // Update chunk counts when session updates
   useEffect(() => {
@@ -531,15 +529,12 @@ const DataTransfer: React.FC<DataTransferProps> = ({ onUnmount }) => {
         </div>
 
         {session && session.status === "active" && (
-          <div
-            className="progress-bar"
-            key={`progress-${Date.now()}-${Math.random()}`}
-          >
+          <div className="progress-bar">
             <div
               className="progress-bar-fill"
               style={{
                 width: percentage !== null ? `${percentage}%` : "0%",
-                transition: "width 0.1s ease-in-out",
+                transition: "width 0.05s linear",
               }}
             />
             <div className="progress-bar-text">
