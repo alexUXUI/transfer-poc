@@ -419,13 +419,73 @@ export class DataTransferService {
     this.polling = false;
   }
 
-  // Poll for pending chunks to process
+  // Add a dedicated method to check for stuck transfers and resolve them
+  private async checkTransferStatus(): Promise<void> {
+    if (!this.session || this.session.totalItems === null) return;
+
+    try {
+      // Get the most up-to-date session data
+      const currentSession = await db.getSession(this.session.id);
+      if (!currentSession || currentSession.totalItems === null) return;
+
+      const { processedItems, totalItems, status } = currentSession;
+
+      console.log(
+        `Checking transfer status: ${processedItems}/${totalItems} (${status})`
+      );
+
+      // If we're active but nothing is happening, check what's missing
+      if (
+        status === "active" &&
+        processedItems < totalItems &&
+        this.pendingChunks.size === 0 &&
+        !this.activeDownload &&
+        this.downloadQueue.length === 0
+      ) {
+        console.log(
+          "Transfer appears stuck. Attempting to resume from current position."
+        );
+
+        // Calculate how many chunks we've processed and how many we should have
+        const chunkSize = currentSession.chunkSize || DEFAULT_CHUNK_SIZE;
+        const expectedChunks = Math.ceil(totalItems / chunkSize);
+        const processedChunks = Math.ceil(processedItems / chunkSize);
+
+        console.log(
+          `Expected chunks: ${expectedChunks}, Processed chunks: ${processedChunks}`
+        );
+
+        if (processedChunks < expectedChunks) {
+          // Resume fetching from where we left off
+          const nextSkip = processedItems;
+          console.log(`Resuming fetch from position ${nextSkip}`);
+          this.enqueueFetch(nextSkip, chunkSize);
+        }
+      }
+
+      // Check if we've actually completed but didn't mark as completed
+      if (status === "active" && processedItems >= totalItems) {
+        console.log(
+          "All items processed but transfer not marked complete. Completing now."
+        );
+        await this.updateSessionStatus("completed");
+        this.stopPolling();
+      }
+    } catch (error) {
+      console.error("Error checking transfer status:", error);
+    }
+  }
+
+  // Modify pollPendingChunks to periodically check transfer status
   private async pollPendingChunks() {
     if (!this.polling || !this.session || this.pauseRequested) {
       return;
     }
 
     try {
+      // Periodically check transfer status to detect and fix stuck transfers
+      await this.checkTransferStatus();
+
       // Don't process more if we're at concurrent limit
       if (this.pendingChunks.size >= MAX_CONCURRENT_CHUNKS) {
         setTimeout(() => this.pollPendingChunks(), 500);
