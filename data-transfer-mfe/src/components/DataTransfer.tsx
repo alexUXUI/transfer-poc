@@ -180,6 +180,52 @@ const DataTransfer: React.FC<DataTransferProps> = ({ onUnmount }) => {
     return () => clearInterval(refreshInterval);
   }, [session]);
 
+  // Add a reset mechanism when session gets into a bad state
+  useEffect(() => {
+    if (!session) return;
+
+    // Detect if processing is stuck with no activity for a long time
+    let lastProcessedCount = session.processedItems;
+    let stuckCounter = 0;
+
+    const stuckDetector = setInterval(() => {
+      if (session.status !== "active") return;
+
+      // Compare if processedItems has changed
+      if (session.processedItems === lastProcessedCount) {
+        stuckCounter++;
+        if (stuckCounter > 20) {
+          // About 5 seconds with no activity
+          console.log("Processing appears stuck, refreshing component state");
+          // Refresh session data directly from database
+          dataTransferService.getCurrentSession().then((currentSession) => {
+            if (currentSession) {
+              setSession(currentSession);
+              setProcessedItems(currentSession.processedItems);
+              setTotalItems(currentSession.totalItems);
+              if (currentSession.totalItems !== null) {
+                setPercentage(
+                  Math.round(
+                    (currentSession.processedItems /
+                      currentSession.totalItems) *
+                      100
+                  )
+                );
+              }
+            }
+          });
+          stuckCounter = 0;
+        }
+      } else {
+        // Reset counter if we have activity
+        stuckCounter = 0;
+        lastProcessedCount = session.processedItems;
+      }
+    }, 250);
+
+    return () => clearInterval(stuckDetector);
+  }, [session?.id]);
+
   // Start transfer
   const startTransfer = useCallback(async () => {
     try {

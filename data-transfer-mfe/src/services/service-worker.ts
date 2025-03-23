@@ -90,10 +90,20 @@ export async function isServiceWorkerActive(): Promise<boolean> {
     if (registration?.active) {
       // Try to ping the service worker to verify it's responsive
       try {
-        const pingResult = await pingServiceWorker();
+        // Add a timeout to the ping check
+        const pingPromise = pingServiceWorker();
+        const timeoutPromise = new Promise<null>((_, reject) => {
+          setTimeout(
+            () => reject(new Error("Service worker ping timed out")),
+            500
+          );
+        });
+
+        // Race the ping against a timeout
+        const pingResult = await Promise.race([pingPromise, timeoutPromise]);
         return pingResult !== null;
       } catch (err) {
-        console.log("Ping to service worker failed:", err);
+        console.log("Service worker ping failed:", err);
         return false;
       }
     }
@@ -162,14 +172,40 @@ export async function sendChunkToServiceWorker(
       throw new Error("No active service worker found");
     }
 
-    registration.active.postMessage({
-      type: "TRANSFER_CHUNK",
-      data: {
-        chunkId,
-        items,
-        targetUrl,
-      },
+    // Create a message channel for potential responses
+    const messageChannel = new MessageChannel();
+
+    // Set up a timeout for acknowledgment
+    const transferPromise = new Promise<void>((resolve, reject) => {
+      const timeoutId = setTimeout(() => {
+        messageChannel.port1.close();
+        reject(new Error("Service worker did not acknowledge chunk transfer"));
+      }, 2000);
+
+      // Listen for acknowledgment
+      messageChannel.port1.onmessage = (event) => {
+        if (event.data?.type === "CHUNK_RECEIVED") {
+          clearTimeout(timeoutId);
+          resolve();
+        }
+      };
+
+      // Send the message with the message channel
+      registration.active.postMessage(
+        {
+          type: "TRANSFER_CHUNK",
+          data: {
+            chunkId,
+            items,
+            targetUrl,
+          },
+        },
+        [messageChannel.port2]
+      );
     });
+
+    // Wait for acknowledgment or timeout
+    await transferPromise;
   } catch (error) {
     console.error("Error sending chunk to service worker:", error);
     throw error;

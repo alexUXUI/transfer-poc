@@ -525,18 +525,45 @@ export class DataTransferService {
     this.setProcessingCount(this.pendingChunks.size);
 
     try {
-      // Check if service worker is available
-      const swActive = await isServiceWorkerActive();
+      // IMPORTANT FIX: For most reliable behavior, prioritize direct processing
+      // Service worker is only used in very specific cases
+      const url = window.location.href;
 
-      if (!swActive) {
-        // Use direct method without retrying SW registration
-        console.log(`Using direct processing for chunk ${chunk.id}`);
+      // Always use direct method by default - it's more reliable for progress updates
+      let useDirectMethod = true;
+
+      // Only attempt service worker on standalone MFE with explicit flags
+      if (!url.includes("/transfer") && !url.includes("localhost:2000")) {
+        // We're not in standalone context - check if service worker is configured
+        try {
+          const swActive = await isServiceWorkerActive();
+          if (swActive) {
+            // Consider service worker mode only if explicitly requested
+            const forceServiceWorker =
+              localStorage.getItem("useServiceWorker") === "true";
+            useDirectMethod = !forceServiceWorker;
+          }
+        } catch (swError) {
+          console.warn(
+            "Error checking service worker, using direct method:",
+            swError
+          );
+        }
+      }
+
+      console.log(
+        `Using ${
+          useDirectMethod ? "direct" : "service worker"
+        } processing for chunk ${chunk.id}`
+      );
+
+      if (useDirectMethod) {
+        // Use direct method - more reliable for progress tracking
         await this.processChunkDirectly(chunk);
         return;
       }
 
-      // If service worker is active, use it
-      console.log(`Using service worker to process chunk ${chunk.id}`);
+      // If service worker is selected, attempt to use it
       try {
         await sendChunkToServiceWorker(
           chunk.id,
@@ -599,28 +626,40 @@ export class DataTransferService {
       if (success) {
         const itemsCount = chunk.items.length;
         if (itemsCount > 0) {
+          // Get fresh session data to ensure accurate counting
+          const freshSession = await db.getSession(currentSession.id);
+          if (!freshSession) {
+            throw new Error("Session not found when updating processed count");
+          }
+
+          // Calculate new count
           const updatedProcessedItems =
-            currentSession.processedItems + itemsCount;
+            freshSession.processedItems + itemsCount;
+
+          // Cap the count at the total items if known
+          const finalCount =
+            freshSession.totalItems !== null
+              ? Math.min(updatedProcessedItems, freshSession.totalItems)
+              : updatedProcessedItems;
 
           // Update session in database
           const updatedSession = await db.updateSession(currentSession.id, {
-            processedItems: updatedProcessedItems,
+            processedItems: finalCount,
             lastChunkId: chunkId,
           });
 
           this.session = updatedSession;
 
-          // DO NOT call onChunkProcessed here to avoid duplicate counting
-          // Simply update chunks count in the UI via progress update
+          // Directly force UI update with progress info
+          console.log(`Updated progress to ${finalCount} items`);
+
           if (this.events.onProgress) {
             const percentage = updatedSession.totalItems
-              ? Math.round(
-                  (updatedProcessedItems / updatedSession.totalItems) * 100
-                )
+              ? Math.round((finalCount / updatedSession.totalItems) * 100)
               : null;
 
             this.events.onProgress(
-              updatedProcessedItems,
+              finalCount,
               updatedSession.totalItems,
               percentage
             );
@@ -1032,44 +1071,55 @@ export class DataTransferService {
       // 5. Get the current processed count
       const itemCount = chunk.items.length;
 
-      // 6. Update the session's processed count
-      const newProcessedCount = (this.session.processedItems || 0) + itemCount;
+      // 6. Get fresh session data to ensure accurate counting
+      const freshSession = await db.getSession(this.session.id);
+      if (!freshSession) {
+        throw new Error("Session not found when updating processed count");
+      }
 
-      // 7. Update the session with the new count
+      // 7. Calculate new count
+      const newProcessedCount = freshSession.processedItems + itemCount;
+
+      // 8. Cap the count at the total items if known
+      const finalCount =
+        freshSession.totalItems !== null
+          ? Math.min(newProcessedCount, freshSession.totalItems)
+          : newProcessedCount;
+
+      // 9. Update the session with the new count
       const updatedSession = await db.updateSession(this.session.id, {
-        processedItems: newProcessedCount,
+        processedItems: finalCount,
         lastChunkId: chunk.id,
       });
 
-      // 8. Update our local reference
+      // 10. Update our local reference
       this.session = updatedSession;
 
-      // 9. Notify the UI of the updated progress - but DO NOT notify chunk processing
-      const processedCount = updatedSession.processedItems;
-      console.log(`DIRECT: Updated progress to ${processedCount} items`);
+      // 11. Notify the UI of the updated progress
+      console.log(`DIRECT: Updated progress to ${finalCount} items`);
 
       if (this.events.onProgress) {
         const percentage = updatedSession.totalItems
-          ? Math.round((processedCount / updatedSession.totalItems) * 100)
+          ? Math.round((finalCount / updatedSession.totalItems) * 100)
           : null;
 
         this.events.onProgress(
-          processedCount,
+          finalCount,
           updatedSession.totalItems,
           percentage
         );
       }
 
-      // 10. Remove from pending chunks
+      // 12. Remove from pending chunks
       this.pendingChunks.delete(chunk.id);
 
-      // 11. Reset retry count
+      // 13. Reset retry count
       this.retryCount = 0;
 
-      // 12. Check if we've completed all items
+      // 14. Check if we've completed all items
       if (
         updatedSession.totalItems !== null &&
-        processedCount >= updatedSession.totalItems
+        finalCount >= updatedSession.totalItems
       ) {
         console.log(
           `DIRECT: All ${updatedSession.totalItems} items processed, completing transfer`
